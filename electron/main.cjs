@@ -25,12 +25,17 @@ function getRoots() {
       dataDir: path.join(root, 'data'),
     };
   }
-  // Packaged: real files live under app.asar.unpacked (asar paths break child spawn on Windows).
+  // Packaged builds use a real resources/app folder (asar disabled) so the API can spawn reliably.
+  // Keep the asar-unpacked fallback for compatibility with earlier builds.
   const unpacked = path.join(process.resourcesPath, 'app.asar.unpacked');
+  const unpackedEntry = path.join(unpacked, 'server', 'dist', 'index.js');
+  const root = fs.existsSync(unpackedEntry)
+    ? unpacked
+    : path.join(process.resourcesPath, 'app');
   return {
-    root: unpacked,
-    serverEntry: path.join(unpacked, 'server', 'dist', 'index.js'),
-    clientDist: path.join(unpacked, 'client', 'dist'),
+    root,
+    serverEntry: path.join(root, 'server', 'dist', 'index.js'),
+    clientDist: path.join(root, 'client', 'dist'),
     dataDir: path.join(app.getPath('userData'), 'data'),
   };
 }

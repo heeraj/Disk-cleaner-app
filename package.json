@@ -58,7 +58,7 @@
       "!**/*.{map,md}"
     ],
     "extraResources": [],
-    "asar": true,
+    "asar": false,
     "win": {
       "target": [
         {
@@ -91,15 +91,7 @@
         "dir"
       ],
       "category": "Utility"
-    },
-    "asarUnpack": [
-      "server/**/*",
-      "data/**/*",
-      "node_modules/tsx/**/*",
-      "node_modules/esbuild/**/*",
-      "client/dist/**/*",
-      "node_modules/**/*"
-    ]
+    }
   },
   "author": "Disk Cleaner"
 }
