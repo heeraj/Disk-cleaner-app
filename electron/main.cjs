@@ -1,14 +1,14 @@
 /**
  * Electron main process.
- * Starts the Express API via utilityProcess (or Node fallback), then loads the UI.
+ * Loads the API in-process (no child spawn) for reliable Windows packaging.
  */
-const { app, BrowserWindow, shell, dialog, utilityProcess } = require('electron');
+const { app, BrowserWindow, shell, dialog } = require('electron');
 const path = require('path');
-const { spawn, execFileSync } = require('child_process');
+const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 
-// Ignore ambient PORT (shells/CI often set it). Only DISK_CLEANER_PORT overrides.
+// Ignore ambient PORT. Only DISK_CLEANER_PORT overrides.
 const API_PORT = Number(process.env.DISK_CLEANER_PORT) || 8787;
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -21,7 +21,7 @@ function getRoots() {
     const root = path.resolve(__dirname, '..');
     return {
       root,
-      serverEntry: path.join(root, 'server', 'dist', 'index.js'),
+      bundle: path.join(root, 'server', 'bundle.cjs'),
       clientDist: path.join(root, 'client', 'dist'),
       dataDir: path.join(root, 'data'),
     };
@@ -31,11 +31,11 @@ function getRoots() {
     path.join(process.resourcesPath, 'app.asar.unpacked'),
   ];
   for (const root of candidates) {
-    const serverEntry = path.join(root, 'server', 'dist', 'index.js');
-    if (fs.existsSync(serverEntry)) {
+    const bundle = path.join(root, 'server', 'bundle.cjs');
+    if (fs.existsSync(bundle)) {
       return {
         root,
-        serverEntry,
+        bundle,
         clientDist: path.join(root, 'client', 'dist'),
         dataDir: path.join(app.getPath('userData'), 'data'),
       };
@@ -44,26 +44,10 @@ function getRoots() {
   const root = path.join(process.resourcesPath, 'app');
   return {
     root,
-    serverEntry: path.join(root, 'server', 'dist', 'index.js'),
+    bundle: path.join(root, 'server', 'bundle.cjs'),
     clientDist: path.join(root, 'client', 'dist'),
     dataDir: path.join(app.getPath('userData'), 'data'),
   };
-}
-
-function findNodeBinary() {
-  try {
-    if (process.platform === 'win32') {
-      const out = execFileSync('where.exe', ['node'], { encoding: 'utf8' });
-      const first = out.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-      if (first && fs.existsSync(first)) return first;
-    } else {
-      const out = execFileSync('which', ['node'], { encoding: 'utf8' }).trim();
-      if (out && fs.existsSync(out)) return out;
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
 }
 
 function checkHealth(port) {
@@ -83,7 +67,7 @@ function checkHealth(port) {
   });
 }
 
-function waitForServer(port, timeoutMs = 30000) {
+function waitForServer(port, timeoutMs = 20000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const tryOnce = async () => {
@@ -95,17 +79,9 @@ function waitForServer(port, timeoutMs = 30000) {
         reject(new Error(`API did not become ready on port ${port}`));
         return;
       }
-      setTimeout(tryOnce, 250);
+      setTimeout(tryOnce, 200);
     };
     void tryOnce();
-  });
-}
-
-function attachProcLogs(proc, label) {
-  if (proc.stdout) proc.stdout.on('data', (c) => console.log(`[${label}]`, String(c)));
-  if (proc.stderr) proc.stderr.on('data', (c) => console.error(`[${label}]`, String(c)));
-  proc.on?.('exit', (code, signal) => {
-    console.log(`[electron] ${label} exited code=${code} signal=${signal}`);
   });
 }
 
@@ -116,74 +92,45 @@ async function startServer() {
   }
 
   const roots = getRoots();
-  const env = {
-    ...process.env,
-    PORT: String(API_PORT),
-    NODE_ENV: isDev ? 'development' : 'production',
-    CLIENT_DIST: roots.clientDist,
-    DATA_DIR: roots.dataDir,
-  };
-  // Avoid confusing a second Electron instance.
-  delete env.ELECTRON_RUN_AS_NODE;
+  process.env.PORT = String(API_PORT);
+  process.env.NODE_ENV = isDev ? 'development' : 'production';
+  process.env.CLIENT_DIST = roots.clientDist;
+  process.env.DATA_DIR = roots.dataDir;
 
   if (isDev) {
     serverProc = spawn(
       process.platform === 'win32' ? 'npx.cmd' : 'npx',
       ['tsx', 'server/index.ts'],
-      { cwd: roots.root, env, stdio: 'pipe', shell: process.platform === 'win32' }
+      {
+        cwd: roots.root,
+        env: process.env,
+        stdio: 'pipe',
+        shell: process.platform === 'win32',
+      }
     );
     startedServer = true;
-    attachProcLogs(serverProc, 'api');
+    serverProc.stdout?.on('data', (c) => console.log('[api]', String(c)));
+    serverProc.stderr?.on('data', (c) => console.error('[api]', String(c)));
     return;
   }
 
-  if (!fs.existsSync(roots.serverEntry)) {
-    throw new Error(`Server entry missing:\n${roots.serverEntry}`);
+  if (!fs.existsSync(roots.bundle)) {
+    throw new Error(
+      `API bundle missing:\n${roots.bundle}\n\nRebuild with npm run build`
+    );
   }
 
-  // 1) Prefer system Node (reliable for ESM + express).
-  const nodeBin = findNodeBinary();
-  if (nodeBin) {
-    console.log('[electron] Starting API with Node:', nodeBin);
-    serverProc = spawn(nodeBin, [roots.serverEntry], {
-      cwd: roots.root,
-      env,
-      stdio: 'pipe',
-      windowsHide: true,
-    });
-    startedServer = true;
-    attachProcLogs(serverProc, 'api-node');
-    return;
-  }
-
-  // 2) Electron utilityProcess (Node-like worker, no second BrowserWindow).
-  if (typeof utilityProcess?.fork === 'function') {
-    console.log('[electron] Starting API with utilityProcess.fork');
-    serverProc = utilityProcess.fork(roots.serverEntry, [], {
-      cwd: roots.root,
-      env,
-      stdio: 'pipe',
-      serviceName: 'disk-cleaner-api',
-    });
-    startedServer = true;
-    attachProcLogs(serverProc, 'api-utility');
-    return;
-  }
-
-  throw new Error(
-    'Could not start the API: Node.js was not found on PATH, and utilityProcess is unavailable. Install Node.js LTS, or run `npm run dev` instead.'
-  );
+  // In-process: no spawn, no PATH, no spaces-in-exe issues.
+  require(roots.bundle);
 }
 
 function stopServer() {
   if (!startedServer || !serverProc) return;
   try {
-    if (typeof serverProc.kill === 'function') {
-      serverProc.kill();
-    } else if (serverProc.pid) {
-      if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(serverProc.pid), '/f', '/t']);
-      }
+    if (process.platform === 'win32' && serverProc.pid) {
+      spawn('taskkill', ['/pid', String(serverProc.pid), '/f', '/t']);
+    } else {
+      serverProc.kill?.('SIGTERM');
     }
   } catch {
     /* ignore */
@@ -221,7 +168,7 @@ async function createWindow() {
     try {
       await mainWindow.loadURL(viteUrl);
     } catch (err) {
-      console.warn('[electron] Vite not reachable, falling back to API static', err);
+      console.warn('[electron] Vite not reachable, falling back to API', err);
       await mainWindow.loadURL(`http://127.0.0.1:${API_PORT}`);
     }
   } else {
@@ -236,10 +183,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[electron] Failed to start', err);
-    dialog.showErrorBox(
-      'Disk Cleaner failed to start',
-      `${message}\n\nTip: install Node.js LTS from https://nodejs.org then retry, or run the web app with npm run dev.`
-    );
+    dialog.showErrorBox('Disk Cleaner failed to start', message);
     app.quit();
   }
 

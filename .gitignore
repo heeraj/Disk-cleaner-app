@@ -16,3 +16,4 @@ coverage/
 *.tsbuildinfo
 data/prefs.json
 !data/.gitkeep
+server/bundle.cjs

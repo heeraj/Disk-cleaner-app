@@ -1,6 +1,6 @@
 {
   "name": "disk-cleaner-app",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Simple, calm, fluid disk cleaner",
   "main": "electron/main.cjs",
@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
-    "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json",
+    "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json && node scripts/bundle-server.cjs",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit",
     "electron:dev": "concurrently -k -n server,client,electron -c blue,green,magenta \"npm run dev:server\" \"npm run dev:client\" \"wait-on http://127.0.0.1:8787/api/health http://127.0.0.1:5173 && cross-env ELECTRON_DEV=1 electron .\"",
@@ -33,6 +33,7 @@
     "cross-env": "^7.0.3",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.12",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.6",
@@ -41,7 +42,7 @@
   "type": "module",
   "build": {
     "appId": "com.diskcleaner.app",
-    "productName": "Disk Cleaner",
+    "productName": "DiskCleaner",
     "copyright": "Copyright \u00a9 Disk Cleaner",
     "directories": {
       "output": "release",
@@ -51,6 +52,7 @@
       "electron/**/*",
       "client/dist/**/*",
       "server/**/*",
+      "server/bundle.cjs",
       "data/**/*",
       "package.json",
       "node_modules/**/*",
