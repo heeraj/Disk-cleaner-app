@@ -3,14 +3,24 @@ import cors from 'cors';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { demoDiskUsage, demoScan } from './demo.js';
-import { getDiskUsage } from './fsutil.js';
+import { getDiskUsage, expandHome, pathExists } from './fsutil.js';
 import {
+  forgetItems,
   getRememberedItems,
   liveScan,
+  rememberCleanItems,
   rememberScan,
   seedRemembered,
 } from './scanner.js';
 import { clearItems } from './cleaner.js';
+import {
+  defaultLargeRoots,
+  demoLargeFind,
+  findLargeItems,
+  largeItemsToCleanItems,
+} from './largeScan.js';
+import { readPrefs, writePrefs } from './prefs.js';
+import type { AppPrefs } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8787;
@@ -44,17 +54,78 @@ app.get('/api/disk', async (_req, res) => {
 
 app.post('/api/scan', async (_req, res) => {
   try {
-    // Artificial calm delay so UI can show scanning state nicely
     await new Promise((r) => setTimeout(r, DEMO_MODE ? 900 : 400));
     const result = DEMO_MODE ? demoScan() : await liveScan();
     rememberScan(result);
     if (DEMO_MODE) {
       seedRemembered(result.groups.flatMap((g) => g.items));
     }
+    await writePrefs({ lastScanAt: result.scannedAt });
     res.json(result);
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Scan failed',
+    });
+  }
+});
+
+app.post('/api/large-scan', async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const minBytes =
+      typeof body.minBytes === 'number' && body.minBytes > 0
+        ? body.minBytes
+        : 50 * 1024 * 1024;
+    const maxDepth =
+      typeof body.maxDepth === 'number' ? Math.min(8, Math.max(1, body.maxDepth)) : 4;
+    const maxItems =
+      typeof body.maxItems === 'number' ? Math.min(200, Math.max(1, body.maxItems)) : 80;
+    const maxMs =
+      typeof body.maxMs === 'number' ? Math.min(60_000, Math.max(1000, body.maxMs)) : 12_000;
+
+    let roots: string[] | undefined;
+    if (Array.isArray(body.roots) && body.roots.length > 0) {
+      roots = [];
+      for (const r of body.roots) {
+        if (typeof r !== 'string') continue;
+        const expanded = path.resolve(expandHome(r));
+        if (await pathExists(expanded)) roots.push(expanded);
+      }
+      if (roots.length === 0) {
+        res.status(400).json({ error: 'None of the provided roots exist' });
+        return;
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, DEMO_MODE ? 600 : 200));
+    const result = DEMO_MODE
+      ? demoLargeFind()
+      : await findLargeItems({ roots, minBytes, maxDepth, maxItems, maxMs });
+
+    rememberCleanItems(largeItemsToCleanItems(result.items));
+    await writePrefs({ lastScanAt: result.scannedAt });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Large scan failed',
+    });
+  }
+});
+
+app.get('/api/large-roots', async (_req, res) => {
+  try {
+    if (DEMO_MODE) {
+      const home = (await import('./fsutil.js')).homeDir();
+      res.json({
+        roots: [home, path.join(home, 'Downloads'), path.join(home, 'Desktop')],
+        demo: true,
+      });
+      return;
+    }
+    res.json({ roots: await defaultLargeRoots(), demo: false });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to list roots',
     });
   }
 });
@@ -79,9 +150,10 @@ app.post('/api/clear', async (req, res) => {
 
     let items = getRememberedItems(ids as string[]);
     if (DEMO_MODE && items.length === 0) {
-      // Allow clear after server restart in demo by re-seeding from demo catalog
       const scan = demoScan();
       seedRemembered(scan.groups.flatMap((g) => g.items));
+      const large = demoLargeFind();
+      rememberCleanItems(largeItemsToCleanItems(large.items));
       items = getRememberedItems(ids as string[]);
     }
 
@@ -97,10 +169,45 @@ app.post('/api/clear', async (req, res) => {
     }
 
     const result = await clearItems(items, DEMO_MODE);
+    forgetItems(result.clearedIds);
     res.json(result);
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Clear failed',
+    });
+  }
+});
+
+app.get('/api/prefs', async (_req, res) => {
+  try {
+    const prefs = await readPrefs();
+    res.json(prefs);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to read prefs',
+    });
+  }
+});
+
+app.put('/api/prefs', async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Partial<AppPrefs>;
+    const allowed: Partial<AppPrefs> = {};
+    if (body.theme === 'light' || body.theme === 'dark') allowed.theme = body.theme;
+    if (body.schedule === 'off' || body.schedule === 'daily' || body.schedule === 'weekly') {
+      allowed.schedule = body.schedule;
+    }
+    if (body.lastScanAt === null || typeof body.lastScanAt === 'string') {
+      allowed.lastScanAt = body.lastScanAt ?? null;
+    }
+    if (body.lastReminderAt === null || typeof body.lastReminderAt === 'string') {
+      allowed.lastReminderAt = body.lastReminderAt ?? null;
+    }
+    const prefs = await writePrefs(allowed);
+    res.json(prefs);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to save prefs',
     });
   }
 });

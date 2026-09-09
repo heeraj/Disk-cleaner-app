@@ -6,7 +6,8 @@ export type CategoryId =
   | 'trash'
   | 'large-downloads'
   | 'logs'
-  | 'build-artifacts';
+  | 'build-artifacts'
+  | 'large-files';
 
 export interface CleanItem {
   id: string;
@@ -47,4 +48,48 @@ export interface ClearResult {
   clearedIds: string[];
   errors: { id: string; message: string }[];
   demo: boolean;
+}
+
+export type LargeItemKind = 'file' | 'dir';
+
+export interface LargeItem {
+  id: string;
+  name: string;
+  path: string;
+  sizeBytes: number;
+  kind: LargeItemKind;
+  cleanId: string;
+}
+
+export interface LargeFindResult {
+  scannedAt: string;
+  demo: boolean;
+  roots: string[];
+  minBytes: number;
+  truncated: boolean;
+  items: LargeItem[];
+  totalBytes: number;
+}
+
+export type ScheduleMode = 'off' | 'daily' | 'weekly';
+export type ThemeMode = 'light' | 'dark';
+
+export interface AppPrefs {
+  theme: ThemeMode;
+  schedule: ScheduleMode;
+  lastScanAt: string | null;
+  lastReminderAt: string | null;
+}
+
+export type PresetId =
+  | 'browser-caches'
+  | 'package-caches'
+  | 'temp'
+  | 'trash'
+  | 'safe-all';
+
+export interface PresetDef {
+  id: PresetId;
+  label: string;
+  description: string;
 }

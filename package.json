@@ -1,15 +1,20 @@
 {
   "name": "disk-cleaner-app",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Simple, calm, fluid disk cleaner",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts && tsc -p server/tsconfig.json",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit"
+    "typecheck": "tsc -p client/tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit",
+    "electron:dev": "concurrently -k -n server,client,electron -c blue,green,magenta \"npm run dev:server\" \"npm run dev:client\" \"wait-on http://127.0.0.1:8787/api/health http://127.0.0.1:5173 && cross-env ELECTRON_DEV=1 electron .\"",
+    "electron:start": "npm run build && cross-env NODE_ENV=production electron .",
+    "electron:build": "npm run build && electron-builder --win portable nsis --x64",
+    "electron:build:dir": "npm run build && electron-builder --dir"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -25,9 +30,74 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vite": "^6.0.6"
+    "vite": "^6.0.6",
+    "wait-on": "^8.0.1"
   },
-  "type": "module"
+  "type": "module",
+  "build": {
+    "appId": "com.diskcleaner.app",
+    "productName": "Disk Cleaner",
+    "copyright": "Copyright © Disk Cleaner",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/resources"
+    },
+    "files": [
+      "electron/**/*",
+      "client/dist/**/*",
+      "server/**/*",
+      "data/**/*",
+      "package.json",
+      "node_modules/**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/*.{map,md}"
+    ],
+    "extraResources": [],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "dir"
+      ],
+      "category": "Utility"
+    },
+    "asarUnpack": [
+      "server/**/*",
+      "data/**/*",
+      "node_modules/tsx/**/*",
+      "node_modules/esbuild/**/*"
+    ]
+  },
+  "author": "Disk Cleaner"
 }

@@ -11,7 +11,7 @@ import {
 } from './fsutil.js';
 
 const CATEGORY_META: Record<
-  CategoryId,
+  Exclude<CategoryId, 'large-files'>,
   { label: string; description: string; safety: Safety }
 > = {
   caches: {
@@ -92,6 +92,29 @@ export async function liveScan(): Promise<ScanResult> {
     }
   }
 
+  // Browser-ish caches often live under ~/.cache — also check common Chromium/Firefox paths
+  const browserCacheHints = [
+    path.join(home, '.cache', 'google-chrome'),
+    path.join(home, '.cache', 'chromium'),
+    path.join(home, '.cache', 'mozilla'),
+    path.join(home, '.mozilla', 'firefox'),
+  ];
+  for (const full of browserCacheHints) {
+    if (!(await pathExists(full))) continue;
+    if (items.some((i) => i.path === full)) continue;
+    const size = await dirSizeBytes(full, 4);
+    if (size < 5 * 1024 * 1024) continue;
+    items.push({
+      id: itemId('cache', full),
+      name: `Browser cache: ${path.basename(full)}`,
+      path: full,
+      sizeBytes: size,
+      category: 'caches',
+      safety: 'safe',
+      description: displayPath(full),
+    });
+  }
+
   const npmCache = path.join(home, '.npm');
   if (await pathExists(npmCache)) {
     const size = await dirSizeBytes(npmCache, 5);
@@ -104,6 +127,22 @@ export async function liveScan(): Promise<ScanResult> {
         category: 'caches',
         safety: 'safe',
         description: displayPath(npmCache),
+      });
+    }
+  }
+
+  const pipCache = path.join(home, '.cache', 'pip');
+  if (await pathExists(pipCache) && !items.some((i) => i.path === pipCache)) {
+    const size = await dirSizeBytes(pipCache, 4);
+    if (size >= 5 * 1024 * 1024) {
+      items.push({
+        id: itemId('cache', pipCache),
+        name: 'pip cache',
+        path: pipCache,
+        sizeBytes: size,
+        category: 'caches',
+        safety: 'safe',
+        description: displayPath(pipCache),
       });
     }
   }
@@ -205,7 +244,7 @@ export async function liveScan(): Promise<ScanResult> {
     byCat.set(item.category, list);
   }
 
-  const order: CategoryId[] = [
+  const order: Exclude<CategoryId, 'large-files'>[] = [
     'caches',
     'temp',
     'trash',
@@ -240,13 +279,25 @@ export async function liveScan(): Promise<ScanResult> {
 
 let lastScanItems = new Map<string, CleanItem>();
 
+/** Merge scan results into the remember map (keeps large-file finds across rescans). */
 export function rememberScan(result: ScanResult): void {
-  lastScanItems = new Map();
+  // Drop previous non-large items so stale safe/review ids cannot be cleared
+  for (const [id, item] of [...lastScanItems.entries()]) {
+    if (item.category !== 'large-files') lastScanItems.delete(id);
+  }
   for (const g of result.groups) {
     for (const item of g.items) {
       lastScanItems.set(item.id, item);
     }
   }
+}
+
+export function rememberCleanItems(items: CleanItem[]): void {
+  for (const item of items) lastScanItems.set(item.id, item);
+}
+
+export function forgetItems(ids: string[]): void {
+  for (const id of ids) lastScanItems.delete(id);
 }
 
 export function getRememberedItems(ids: string[]): CleanItem[] {

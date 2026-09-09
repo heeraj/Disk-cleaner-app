@@ -1,4 +1,10 @@
-import type { ClearResult, DiskUsage, ScanResult } from '../types';
+import type {
+  AppPrefs,
+  ClearResult,
+  DiskUsage,
+  LargeFindResult,
+  ScanResult,
+} from '../types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -20,9 +26,36 @@ export function runScan(): Promise<ScanResult> {
   return request('/api/scan', { method: 'POST', body: '{}' });
 }
 
+export function runLargeScan(body: {
+  roots?: string[];
+  minBytes?: number;
+  maxDepth?: number;
+  maxItems?: number;
+}): Promise<LargeFindResult> {
+  return request('/api/large-scan', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export function fetchLargeRoots(): Promise<{ roots: string[]; demo: boolean }> {
+  return request('/api/large-roots');
+}
+
 export function clearSelected(ids: string[]): Promise<ClearResult> {
   return request('/api/clear', {
     method: 'POST',
     body: JSON.stringify({ ids, confirm: true }),
+  });
+}
+
+export function fetchPrefs(): Promise<AppPrefs> {
+  return request('/api/prefs');
+}
+
+export function savePrefs(partial: Partial<AppPrefs>): Promise<AppPrefs> {
+  return request('/api/prefs', {
+    method: 'PUT',
+    body: JSON.stringify(partial),
   });
 }

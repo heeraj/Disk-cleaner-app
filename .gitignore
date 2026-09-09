@@ -2,6 +2,8 @@ node_modules/
 dist/
 client/dist/
 server/dist/
+release/
+out/
 *.local
 .env
 .env.*
@@ -11,3 +13,6 @@ server/dist/
 npm-debug.log*
 .vite/
 coverage/
+*.tsbuildinfo
+data/prefs.json
+!data/.gitkeep
