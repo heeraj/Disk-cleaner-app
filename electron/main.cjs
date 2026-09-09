@@ -1,8 +1,8 @@
 /**
  * Electron main process.
- * Spawns the Express API if needed, then loads the Vite UI (dev) or built client via the API (prod).
+ * Spawns the Express API if needed, then loads the UI from the API (or Vite in dev).
  */
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
@@ -10,11 +10,30 @@ const fs = require('fs');
 
 const API_PORT = Number(process.env.PORT) || 8787;
 const isDev = process.env.ELECTRON_DEV === '1';
-const ROOT = path.resolve(__dirname, '..');
 
 let mainWindow = null;
 let serverProc = null;
 let startedServer = false;
+
+function getRoots() {
+  if (!app.isPackaged) {
+    const root = path.resolve(__dirname, '..');
+    return {
+      root,
+      serverEntry: path.join(root, 'server', 'dist', 'index.js'),
+      clientDist: path.join(root, 'client', 'dist'),
+      dataDir: path.join(root, 'data'),
+    };
+  }
+  // Packaged: real files live under app.asar.unpacked (asar paths break child spawn on Windows).
+  const unpacked = path.join(process.resourcesPath, 'app.asar.unpacked');
+  return {
+    root: unpacked,
+    serverEntry: path.join(unpacked, 'server', 'dist', 'index.js'),
+    clientDist: path.join(unpacked, 'client', 'dist'),
+    dataDir: path.join(app.getPath('userData'), 'data'),
+  };
+}
 
 function checkHealth(port) {
   return new Promise((resolve) => {
@@ -57,38 +76,48 @@ async function startServer() {
     return;
   }
 
+  const { root, serverEntry, clientDist, dataDir } = getRoots();
   const env = {
     ...process.env,
     PORT: String(API_PORT),
     NODE_ENV: isDev ? 'development' : 'production',
+    CLIENT_DIST: clientDist,
+    DATA_DIR: dataDir,
   };
 
   if (isDev) {
     serverProc = spawn(
       process.platform === 'win32' ? 'npx.cmd' : 'npx',
       ['tsx', 'server/index.ts'],
-      { cwd: ROOT, env, stdio: 'inherit', shell: process.platform === 'win32' }
+      { cwd: root, env, stdio: 'pipe', shell: process.platform === 'win32' }
     );
   } else {
-    const compiled = path.join(ROOT, 'server', 'dist', 'index.js');
-    if (fs.existsSync(compiled)) {
-      serverProc = spawn(process.execPath, [compiled], {
-        cwd: ROOT,
-        env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
-        stdio: 'inherit',
-      });
-    } else {
-      serverProc = spawn(
-        process.platform === 'win32' ? 'npx.cmd' : 'npx',
-        ['tsx', 'server/index.ts'],
-        { cwd: ROOT, env, stdio: 'inherit', shell: process.platform === 'win32' }
-      );
+    if (!fs.existsSync(serverEntry)) {
+      throw new Error(`Server entry missing:\n${serverEntry}`);
     }
+    // Prefer a real filesystem path (unpacked), not app.asar/...
+    serverProc = spawn(process.execPath, [serverEntry], {
+      cwd: root,
+      env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: 'pipe',
+    });
   }
 
   startedServer = true;
+  let errBuf = '';
+  if (serverProc.stderr) {
+    serverProc.stderr.on('data', (chunk) => {
+      const text = String(chunk);
+      errBuf += text;
+      console.error('[api]', text);
+    });
+  }
+  if (serverProc.stdout) {
+    serverProc.stdout.on('data', (chunk) => console.log('[api]', String(chunk)));
+  }
   serverProc.on('exit', (code, signal) => {
     console.log(`[electron] API process exited code=${code} signal=${signal}`);
+    if (errBuf) console.error('[electron] API stderr:', errBuf.slice(-2000));
   });
 }
 
@@ -150,7 +179,12 @@ app.whenReady().then(async () => {
     await startServer();
     await createWindow();
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error('[electron] Failed to start', err);
+    dialog.showErrorBox(
+      'Disk Cleaner failed to start',
+      `${message}\n\nIf this keeps happening, run the web version with npm run dev, or reinstall from the latest release.`
+    );
     app.quit();
   }
 

@@ -213,7 +213,9 @@ app.put('/api/prefs', async (req, res) => {
 });
 
 // Production: serve built client
-const clientDist = path.resolve(__dirname, '../client/dist');
+const clientDist = process.env.CLIENT_DIST
+  ? path.resolve(process.env.CLIENT_DIST)
+  : path.resolve(__dirname, '../client/dist');
 app.use(express.static(clientDist));
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();

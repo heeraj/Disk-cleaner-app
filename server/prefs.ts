@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import type { AppPrefs } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PREFS_PATH = path.resolve(__dirname, '../data/prefs.json');
+const PREFS_PATH = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR, 'prefs.json')
+  : path.resolve(__dirname, '../data/prefs.json');
 
 const DEFAULTS: AppPrefs = {
   theme: 'light',

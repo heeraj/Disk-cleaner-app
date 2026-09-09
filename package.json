@@ -42,7 +42,7 @@
   "build": {
     "appId": "com.diskcleaner.app",
     "productName": "Disk Cleaner",
-    "copyright": "Copyright © Disk Cleaner",
+    "copyright": "Copyright \u00a9 Disk Cleaner",
     "directories": {
       "output": "release",
       "buildResources": "electron/resources"
@@ -96,7 +96,9 @@
       "server/**/*",
       "data/**/*",
       "node_modules/tsx/**/*",
-      "node_modules/esbuild/**/*"
+      "node_modules/esbuild/**/*",
+      "client/dist/**/*",
+      "node_modules/**/*"
     ]
   },
   "author": "Disk Cleaner"
