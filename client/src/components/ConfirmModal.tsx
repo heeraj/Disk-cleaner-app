@@ -8,6 +8,8 @@ interface Props {
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  title?: string;
+  confirmLabel?: string;
 }
 
 export function ConfirmModal({
@@ -17,17 +19,26 @@ export function ConfirmModal({
   busy,
   onCancel,
   onConfirm,
+  title = 'Clear selected items?',
+  confirmLabel = 'Yes, clear',
 }: Props) {
   const confirmRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     confirmRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) onCancel();
+      if (e.key === 'Escape' && !busy) {
+        e.preventDefault();
+        onCancel();
+      }
+      if (e.key === 'Enter' && !busy && document.activeElement === confirmRef.current) {
+        e.preventDefault();
+        onConfirm();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [busy, onCancel]);
+  }, [busy, onCancel, onConfirm]);
 
   return (
     <div
@@ -43,7 +54,7 @@ export function ConfirmModal({
         aria-modal="true"
         aria-labelledby="confirm-title"
       >
-        <h3 id="confirm-title">Clear selected items?</h3>
+        <h3 id="confirm-title">{title}</h3>
         <p>
           This will free about <strong>{formatBytes(bytes)}</strong> across{' '}
           <strong>{count}</strong> item{count === 1 ? '' : 's'}.
@@ -68,7 +79,7 @@ export function ConfirmModal({
             onClick={onConfirm}
             disabled={busy}
           >
-            {busy ? 'Clearing…' : 'Yes, clear'}
+            {busy ? 'Clearing…' : confirmLabel}
           </button>
         </div>
       </div>

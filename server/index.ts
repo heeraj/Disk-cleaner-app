@@ -18,6 +18,7 @@ import {
   demoLargeFind,
   findLargeItems,
   largeItemsToCleanItems,
+  listDirChildren,
 } from './largeScan.js';
 import { readPrefs, writePrefs } from './prefs.js';
 import type { AppPrefs } from './types.js';
@@ -108,6 +109,54 @@ app.post('/api/large-scan', async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Large scan failed',
+    });
+  }
+});
+
+
+app.post('/api/list-dir', async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const dirPath = typeof body.path === 'string' ? body.path.trim() : '';
+    if (!dirPath) {
+      res.status(400).json({ error: 'Provide a folder path' });
+      return;
+    }
+    if (DEMO_MODE) {
+      const home = (await import('./fsutil.js')).homeDir();
+      res.json({
+        path: path.resolve(expandHome(dirPath)),
+        truncated: false,
+        demo: true,
+        children: [
+          {
+            name: 'sample-large.bin',
+            path: path.join(home, 'sample-large.bin'),
+            sizeBytes: 900_000_000,
+            kind: 'file',
+            mtimeMs: Date.now() - 10 * 86400000,
+          },
+          {
+            name: 'old-backup',
+            path: path.join(home, 'old-backup'),
+            sizeBytes: 3_200_000_000,
+            kind: 'dir',
+            mtimeMs: Date.now() - 400 * 86400000,
+          },
+        ],
+      });
+      return;
+    }
+    const expanded = path.resolve(expandHome(dirPath));
+    if (!(await pathExists(expanded))) {
+      res.status(404).json({ error: 'Folder not found' });
+      return;
+    }
+    const result = await listDirChildren(expanded);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to list folder',
     });
   }
 });

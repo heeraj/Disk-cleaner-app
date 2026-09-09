@@ -3,6 +3,7 @@ import type {
   ClearResult,
   DiskUsage,
   LargeFindResult,
+  ListDirResult,
   ScanResult,
 } from '../types';
 
@@ -40,6 +41,13 @@ export function runLargeScan(body: {
 
 export function fetchLargeRoots(): Promise<{ roots: string[]; demo: boolean }> {
   return request('/api/large-roots');
+}
+
+export function listDirectory(dirPath: string): Promise<ListDirResult> {
+  return request('/api/list-dir', {
+    method: 'POST',
+    body: JSON.stringify({ path: dirPath }),
+  });
 }
 
 export function clearSelected(ids: string[]): Promise<ClearResult> {

@@ -60,6 +60,23 @@ export interface LargeItem {
   kind: LargeItemKind;
   /** Same id registered for /api/clear */
   cleanId: string;
+  /** Modification time (ms since epoch), when available */
+  mtimeMs?: number;
+}
+
+export interface DirChild {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  kind: LargeItemKind;
+  mtimeMs?: number;
+}
+
+export interface ListDirResult {
+  path: string;
+  truncated: boolean;
+  children: DirChild[];
+  demo: boolean;
 }
 
 export interface LargeFindResult {

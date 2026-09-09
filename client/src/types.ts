@@ -59,6 +59,8 @@ export interface LargeItem {
   sizeBytes: number;
   kind: LargeItemKind;
   cleanId: string;
+  /** Modification time (ms since epoch), when available */
+  mtimeMs?: number;
 }
 
 export interface LargeFindResult {
@@ -69,6 +71,21 @@ export interface LargeFindResult {
   truncated: boolean;
   items: LargeItem[];
   totalBytes: number;
+}
+
+export interface DirChild {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  kind: LargeItemKind;
+  mtimeMs?: number;
+}
+
+export interface ListDirResult {
+  path: string;
+  truncated: boolean;
+  children: DirChild[];
+  demo: boolean;
 }
 
 export type ScheduleMode = 'off' | 'daily' | 'weekly';
@@ -92,4 +109,11 @@ export interface PresetDef {
   id: PresetId;
   label: string;
   description: string;
+}
+
+export interface LastScanSummary {
+  at: string;
+  reclaimableBytes: number;
+  groupCount: number;
+  itemCount: number;
 }

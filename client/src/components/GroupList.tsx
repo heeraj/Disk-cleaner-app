@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { CleanGroup } from '../types';
 import { formatBytes } from '../utils';
+import { PathActions } from './PathActions';
 
 interface Props {
   groups: CleanGroup[];
@@ -51,7 +52,14 @@ export function GroupList({ groups, selected, onToggleItem, onToggleGroup }: Pro
                 <strong>{group.label}</strong>
                 <span>{group.description}</span>
               </div>
-              <span className={`chip ${group.safety}`}>
+              <span
+                className={`chip ${group.safety}`}
+                title={
+                  group.safety === 'safe'
+                    ? 'Generally safe to remove'
+                    : 'Review carefully before deleting'
+                }
+              >
                 {group.safety === 'safe' ? 'Safe' : 'Review'}
               </span>
               <span className="group-size">{formatBytes(group.totalBytes)}</span>
@@ -74,20 +82,35 @@ export function GroupList({ groups, selected, onToggleItem, onToggleGroup }: Pro
                   </button>
                 </div>
                 {group.items.map((item) => (
-                  <label key={item.id} className="item">
-                    <input
-                      className="check"
-                      type="checkbox"
-                      checked={selected.has(item.id)}
-                      onChange={() => onToggleItem(item.id)}
-                      aria-label={`Select ${item.name}`}
-                    />
-                    <div className="item-text">
-                      <strong>{item.name}</strong>
-                      <span title={item.path}>{item.description || item.path}</span>
-                    </div>
-                    <div className="item-size">{formatBytes(item.sizeBytes)}</div>
-                  </label>
+                  <div key={item.id} className="item item-row">
+                    <label className="item-main">
+                      <input
+                        className="check"
+                        type="checkbox"
+                        checked={selected.has(item.id)}
+                        onChange={() => onToggleItem(item.id)}
+                        aria-label={`Select ${item.name}`}
+                      />
+                      <div className="item-text">
+                        <strong>
+                          {item.name}{' '}
+                          <span
+                            className={`chip ${item.safety}`}
+                            title={
+                              item.safety === 'safe'
+                                ? 'Safe to clear'
+                                : 'Review carefully'
+                            }
+                          >
+                            {item.safety === 'safe' ? 'Safe' : 'Review'}
+                          </span>
+                        </strong>
+                        <span title={item.path}>{item.description || item.path}</span>
+                      </div>
+                      <div className="item-size">{formatBytes(item.sizeBytes)}</div>
+                    </label>
+                    <PathActions path={item.path} compact />
+                  </div>
                 ))}
               </div>
             </div>

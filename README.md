@@ -1,8 +1,8 @@
 # Disk Cleaner
 
-A simple, calm, fluid disk cleaner — scan → review → free space in under a minute.
+A calm, Windows-style disk cleaner — scan → review → free space in under a minute.
 
-Works as a **web app** (Vite + Express) and as a **standalone Electron desktop app**.
+Works as a **web app** (Vite + Express) and as a **standalone Electron desktop app** with native folder Browse and Open / Show in Explorer.
 
 ## Quick start (web)
 
@@ -42,10 +42,16 @@ Open `http://localhost:5173` in your browser. Use PowerShell or cmd; Node.js 18+
 
 ### Electron architecture
 
-- Main process (`electron/main.cjs`) **spawns the Express API**, waits for `/api/health`, then loads:
+- Main process (`electron/main.cjs`) starts the Express API (spawn in dev, in-process bundle in prod), waits for `/api/health`, then loads:
   - **Dev:** `http://localhost:5173` (Vite)
-  - **Prod:** `http://127.0.0.1:8787` (Express serves `client/dist`)
-- Recurring scan reminders use an **in-app interval while the window is open**. True OS background scheduling (Task Scheduler / launchd / systemd timers) is **future work**.
+  - **Prod:** `http://127.0.0.1:${API_PORT}` (Express serves `client/dist`)
+- Application menu is minimal (About / Quit only) — no File/Edit/View browser chrome.
+- Secure preload (`electron/preload.cjs`) exposes `window.diskCleaner` via `contextBridge` (no `nodeIntegration`):
+  - **Browse…** — `dialog.showOpenDialog({ properties: ['openDirectory'] })` to pick scan roots
+  - **Open** / **Show** — `shell.openPath` / `shell.showItemInFolder` on clean items and large-file results
+  - **Empty Recycle Bin** (Windows) — PowerShell `Clear-RecycleBin` with an in-app confirm
+- In browser / `npm run dev` without Electron, typed path input remains; Browse / Explorer actions hide when `window.diskCleaner` is unavailable.
+- Recurring scan reminders use an **in-app interval while the window is open**. True OS background scheduling is **future work**.
 
 ### Windows desktop build
 
@@ -81,7 +87,7 @@ One click selects matching groups after a scan (or triggers a scan first):
 **Presets never delete** — they only select. You must confirm Clear.
 
 ### Large files & folders
-Separate tab to find the largest files/folders under user-chosen roots (defaults: home, Downloads, Desktop). Configurable minimum size (e.g. 50 MB). Scans are bounded by depth, time, and count. Select + delete uses the same confirm-required clear path; items are always **Review**.
+Separate sidebar view to find the largest files/folders under user-chosen roots (defaults: home, Downloads, Desktop). Configurable minimum size (e.g. 50 MB). **Browse…** picks folders in Electron; typed paths still work in the browser. Sort by size / oldest / name / path; filter files vs folders; duplicate-name hints; drill into a folder (list children without deleting). Each row has **Open** / **Show in Explorer** when running under Electron. Scans are bounded by depth, time, and count. Select + delete uses the same confirm-required clear path; items are always **Review**.
 
 ### Scheduled / recurring scans
 Preferences: off / daily / weekly. Stored in `data/prefs.json` on the server and mirrored in `localStorage`. UI shows last scan time and next reminder. Electron checks on an interval while open.
@@ -131,6 +137,7 @@ In demo mode the API returns realistic sample disk usage and findings. Clear req
 | `POST` | `/api/scan` | `{}` | Grouped findings |
 | `POST` | `/api/large-scan` | `{ roots?, minBytes?, maxDepth?, maxItems? }` | Largest files/folders |
 | `GET` | `/api/large-roots` | — | Default roots that exist |
+| `POST` | `/api/list-dir` | `{ path }` | List children of one folder (drill-in) |
 | `POST` | `/api/clear` | `{ ids, confirm: true }` | Deletes only confirmed ids |
 | `GET` | `/api/prefs` | — | Theme / schedule / last scan |
 | `PUT` | `/api/prefs` | partial prefs | Persist preferences |
@@ -144,7 +151,7 @@ In demo mode the API returns realistic sample disk usage and findings. Clear req
 ## Accessibility
 
 - Labeled controls and dialogs
-- Focus styles and Escape-to-dismiss on the confirm modal
+- Focus styles; Escape closes modals; Enter activates the focused primary action
 - Live regions for scanning / success / errors
 - Progressbar semantics on the disk usage bar
 - Theme toggle with accessible label

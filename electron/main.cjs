@@ -2,7 +2,7 @@
  * Electron main process.
  * Loads the API in-process (no child spawn) for reliable Windows packaging.
  */
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, shell, dialog, Menu, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
@@ -138,15 +138,99 @@ function stopServer() {
   serverProc = null;
 }
 
+function installAppMenu() {
+  const template = [
+    {
+      label: 'Disk Cleaner',
+      submenu: [
+        {
+          label: 'About Disk Cleaner',
+          click: () => {
+            dialog.showMessageBox({
+              type: 'info',
+              title: 'About Disk Cleaner',
+              message: 'Disk Cleaner',
+              detail: `Version ${app.getVersion()}\nScan, review, and free space — safely.`,
+            });
+          },
+        },
+        { type: 'separator' },
+        { role: 'quit', label: 'Quit' },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function registerIpc() {
+  ipcMain.handle('dialog:openDirectory', async () => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    const result = await dialog.showOpenDialog(win ?? undefined, {
+      properties: ['openDirectory'],
+      title: 'Choose folder',
+    });
+    if (result.canceled || !result.filePaths?.length) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('shell:openPath', async (_event, target) => {
+    if (typeof target !== 'string' || !target.trim()) {
+      return 'Invalid path';
+    }
+    return shell.openPath(target);
+  });
+
+  ipcMain.handle('shell:showItemInFolder', async (_event, target) => {
+    if (typeof target !== 'string' || !target.trim()) {
+      throw new Error('Invalid path');
+    }
+    shell.showItemInFolder(target);
+  });
+
+  ipcMain.handle('recycle:empty', async () => {
+    if (process.platform !== 'win32') {
+      return { ok: false, error: 'Empty Recycle Bin is only available on Windows' };
+    }
+    return new Promise((resolve) => {
+      const child = spawn(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Clear-RecycleBin -Force -ErrorAction SilentlyContinue',
+        ],
+        { windowsHide: true }
+      );
+      let stderr = '';
+      child.stderr?.on('data', (c) => {
+        stderr += String(c);
+      });
+      child.on('error', (err) => {
+        resolve({ ok: false, error: err.message });
+      });
+      child.on('close', (code) => {
+        if (code === 0) resolve({ ok: true });
+        else
+          resolve({
+            ok: false,
+            error: stderr.trim() || `PowerShell exited with code ${code}`,
+          });
+      });
+    });
+  });
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 780,
-    minWidth: 640,
+    width: 980,
+    height: 720,
+    minWidth: 720,
     minHeight: 520,
     show: false,
     title: 'Disk Cleaner',
-    backgroundColor: '#f6f5f2',
+    backgroundColor: '#f3f3f3',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -177,6 +261,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  installAppMenu();
+  registerIpc();
   try {
     await startServer();
     await createWindow();

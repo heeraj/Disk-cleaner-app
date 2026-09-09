@@ -19,11 +19,12 @@ import type {
   DiskUsage,
   LargeFindResult,
   LargeItem,
+  LastScanSummary,
   PresetId,
   ScanResult,
   ScheduleMode,
 } from './types';
-import { formatBytes, idsForPreset, isReminderDue } from './utils';
+import { formatBytes, formatWhen, idsForPreset, isReminderDue } from './utils';
 
 type Phase = 'idle' | 'scanning' | 'results' | 'success';
 type Tab = 'clean' | 'large' | 'prefs';
@@ -34,6 +35,32 @@ const DEFAULT_PREFS: AppPrefs = {
   lastScanAt: null,
   lastReminderAt: null,
 };
+
+const SUMMARY_KEY = 'disk-cleaner-last-summary';
+
+function readSummary(): LastScanSummary | null {
+  try {
+    const raw = localStorage.getItem(SUMMARY_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as LastScanSummary;
+  } catch {
+    return null;
+  }
+}
+
+function writeSummary(summary: LastScanSummary) {
+  try {
+    localStorage.setItem(SUMMARY_KEY, JSON.stringify(summary));
+  } catch {
+    /* ignore */
+  }
+}
+
+const NAV: { id: Tab; label: string; hint: string }[] = [
+  { id: 'clean', label: 'Clean', hint: 'Caches, temp, trash' },
+  { id: 'large', label: 'Large files', hint: 'Biggest items' },
+  { id: 'prefs', label: 'Preferences', hint: 'Reminders & tools' },
+];
 
 export default function App() {
   const [disk, setDisk] = useState<DiskUsage | null>(null);
@@ -50,6 +77,9 @@ export default function App() {
   const [largeResult, setLargeResult] = useState<LargeFindResult | null>(null);
   const [prefs, setPrefs] = useState<AppPrefs>(DEFAULT_PREFS);
   const [showReminder, setShowReminder] = useState(false);
+  const [lastSummary, setLastSummary] = useState<LastScanSummary | null>(() =>
+    readSummary()
+  );
 
   const { theme, setTheme, toggle } = useTheme();
 
@@ -70,7 +100,6 @@ export default function App() {
       const p = await fetchPrefs();
       setPrefs(p);
       if (p.theme === 'light' || p.theme === 'dark') setTheme(p.theme);
-      // Mirror schedule to localStorage for Electron interval / offline
       try {
         localStorage.setItem('disk-cleaner-schedule', p.schedule);
         if (p.lastScanAt) localStorage.setItem('disk-cleaner-last-scan', p.lastScanAt);
@@ -79,7 +108,6 @@ export default function App() {
       }
       setShowReminder(isReminderDue(p.schedule, p.lastScanAt, p.lastReminderAt));
     } catch {
-      // Fall back to localStorage-only
       try {
         const schedule = (localStorage.getItem('disk-cleaner-schedule') ||
           'off') as ScheduleMode;
@@ -103,7 +131,6 @@ export default function App() {
     void loadPrefs();
   }, [loadDisk, loadPrefs]);
 
-  // In-app schedule check (web + Electron while open)
   useEffect(() => {
     const tick = () => {
       setShowReminder(
@@ -115,7 +142,6 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [prefs.schedule, prefs.lastScanAt, prefs.lastReminderAt]);
 
-  // Persist theme to server prefs (best-effort)
   useEffect(() => {
     if (prefs.theme === theme) return;
     setPrefs((p) => ({ ...p, theme }));
@@ -163,6 +189,17 @@ export default function App() {
     setShowReminder(false);
   }, []);
 
+  function rememberCleanSummary(result: ScanResult) {
+    const summary: LastScanSummary = {
+      at: result.scannedAt,
+      reclaimableBytes: result.totalReclaimableBytes,
+      groupCount: result.groups.length,
+      itemCount: result.groups.reduce((n, g) => n + g.items.length, 0),
+    };
+    writeSummary(summary);
+    setLastSummary(summary);
+  }
+
   async function handleScan() {
     setError(null);
     setPhase('scanning');
@@ -172,6 +209,7 @@ export default function App() {
     try {
       const result = await runScan();
       setScan(result);
+      rememberCleanSummary(result);
       const safeIds = result.groups
         .filter((g) => g.safety === 'safe')
         .flatMap((g) => g.items.map((i) => i.id));
@@ -215,6 +253,7 @@ export default function App() {
       try {
         const result = await runScan();
         setScan(result);
+        rememberCleanSummary(result);
         groups = result.groups;
         setPhase('results');
         await markScanned(result.scannedAt);
@@ -313,13 +352,19 @@ export default function App() {
   const showClearBar = selected.size > 0 && (tab === 'clean' || tab === 'large');
 
   return (
-    <div className="app">
-      <header className="header">
-        <div className="brand">
-          <h1>Disk Cleaner</h1>
-          <p>Scan, review, free space — calmly, in under a minute.</p>
+    <div className="app-shell">
+      <header className="titlebar">
+        <div className="titlebar-brand">
+          <span className="app-icon" aria-hidden="true">
+            ◧
+          </span>
+          <div>
+            <div className="app-name">Disk Cleaner</div>
+            <div className="app-sub">Local utility</div>
+          </div>
         </div>
-        <div className="header-actions">
+        <DiskOverview disk={disk} loading={diskLoading} compact />
+        <div className="titlebar-actions">
           <button
             type="button"
             className="icon-btn"
@@ -327,11 +372,11 @@ export default function App() {
             aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
           >
-            {theme === 'dark' ? '☀️' : '🌙'}
+            {theme === 'dark' ? '☀' : '☾'}
           </button>
           {demo ? (
             <span className="badge demo" title="Using sample data">
-              Demo mode
+              Demo
             </span>
           ) : (
             <span className="badge">Local</span>
@@ -339,167 +384,176 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="tabs" aria-label="Main">
-        {(
-          [
-            ['clean', 'Clean'],
-            ['large', 'Large files'],
-            ['prefs', 'Preferences'],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            className={`tab ${tab === id ? 'active' : ''}`}
-            aria-current={tab === id ? 'page' : undefined}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      <DiskOverview disk={disk} loading={diskLoading} />
-
-      {showReminder && tab !== 'prefs' && (
-        <div className="reminder-banner card-flush" role="status">
-          <div>
-            <strong>Time for a scan</strong>
-            <p>Your recurring reminder is due.</p>
-          </div>
-          <div className="actions" style={{ margin: 0 }}>
+      <div className="app-body">
+        <nav className="sidebar" aria-label="Main">
+          {NAV.map((item) => (
             <button
+              key={item.id}
               type="button"
-              className="btn btn-primary"
-              onClick={() => {
-                setTab('clean');
-                void handleScan();
-              }}
+              className={`nav-item ${tab === item.id ? 'active' : ''}`}
+              aria-current={tab === item.id ? 'page' : undefined}
+              onClick={() => setTab(item.id)}
             >
-              Scan now
+              <span className="nav-label">{item.label}</span>
+              <span className="nav-hint">{item.hint}</span>
             </button>
-            <button type="button" className="btn btn-ghost" onClick={dismissReminder}>
-              Later
-            </button>
-          </div>
-        </div>
-      )}
+          ))}
+        </nav>
 
-      {tab === 'clean' && (
-        <>
-          <PresetsBar
-            disabled={phase === 'scanning'}
-            onPreset={applyPreset}
-            active={activePreset}
-          />
-
-          {phase === 'idle' && (
-            <section className="card state-panel" aria-labelledby="idle-title">
-              <h2 id="idle-title">Ready when you are</h2>
-              <p>
-                We’ll look for caches, temp files, trash, and large downloads. Safe
-                items are selected by default; anything marked “Review” stays
-                unchecked. Or use a Quick clean preset above.
-              </p>
-              <div className="actions" style={{ justifyContent: 'center' }}>
-                <button type="button" className="btn btn-primary" onClick={handleScan}>
-                  Scan for cleanups
+        <main className="main">
+          {showReminder && tab !== 'prefs' && (
+            <div className="reminder-banner" role="status">
+              <div>
+                <strong>Time for a scan</strong>
+                <p>Your recurring reminder is due.</p>
+              </div>
+              <div className="actions" style={{ margin: 0 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setTab('clean');
+                    void handleScan();
+                  }}
+                >
+                  Scan now
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={dismissReminder}>
+                  Later
                 </button>
               </div>
-            </section>
+            </div>
           )}
 
-          {phase === 'scanning' && (
-            <section className="card state-panel" aria-live="polite" aria-busy="true">
-              <div className="pulse" aria-hidden="true" />
-              <h2>Scanning…</h2>
-              <p>Looking through common safe targets. This stays on your machine.</p>
-            </section>
-          )}
+          {tab === 'clean' && (
+            <>
+              <PresetsBar
+                disabled={phase === 'scanning'}
+                onPreset={applyPreset}
+                active={activePreset}
+              />
 
-          {phase === 'results' && scan && (
-            <section className="card" aria-labelledby="results-title">
-              <div className="results-header">
-                <h2 id="results-title">Findings</h2>
-                <div className="reclaim">
-                  {formatBytes(scan.totalReclaimableBytes)} reclaimable
-                </div>
-              </div>
-              {scan.groups.length === 0 ? (
-                <div className="state-panel" style={{ padding: '1.5rem 0' }}>
-                  <h2>All clear</h2>
-                  <p>No notable cleanup targets turned up. You’re in good shape.</p>
-                  <button type="button" className="btn btn-ghost" onClick={resetToIdle}>
-                    Back
-                  </button>
-                </div>
-              ) : (
-                <GroupList
-                  groups={scan.groups}
-                  selected={selected}
-                  onToggleItem={toggleItem}
-                  onToggleGroup={toggleGroup}
-                />
+              {phase === 'idle' && (
+                <section className="panel state-panel" aria-labelledby="idle-title">
+                  <h2 id="idle-title">Ready to scan</h2>
+                  <p>
+                    Look for caches, temp files, trash, and large downloads. Safe
+                    items are selected by default; Review items stay unchecked.
+                  </p>
+                  {lastSummary && (
+                    <div className="last-scan-summary" role="status">
+                      <strong>Last scan</strong>
+                      <span>
+                        {formatWhen(lastSummary.at)} ·{' '}
+                        {formatBytes(lastSummary.reclaimableBytes)} reclaimable ·{' '}
+                        {lastSummary.itemCount} item
+                        {lastSummary.itemCount === 1 ? '' : 's'} in{' '}
+                        {lastSummary.groupCount} group
+                        {lastSummary.groupCount === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                  )}
+                  <div className="actions" style={{ justifyContent: 'center' }}>
+                    <button type="button" className="btn btn-primary" onClick={handleScan}>
+                      Scan for cleanups
+                    </button>
+                  </div>
+                </section>
               )}
-              <div className="actions" style={{ marginTop: '1rem' }}>
-                <button type="button" className="btn btn-ghost" onClick={handleScan}>
-                  Scan again
-                </button>
-              </div>
-            </section>
+
+              {phase === 'scanning' && (
+                <section className="panel state-panel" aria-live="polite" aria-busy="true">
+                  <div className="pulse" aria-hidden="true" />
+                  <h2>Scanning…</h2>
+                  <p>Looking through common safe targets on this machine.</p>
+                </section>
+              )}
+
+              {phase === 'results' && scan && (
+                <section className="panel" aria-labelledby="results-title">
+                  <div className="results-header">
+                    <h2 id="results-title">Findings</h2>
+                    <div className="reclaim">
+                      {formatBytes(scan.totalReclaimableBytes)} reclaimable
+                    </div>
+                  </div>
+                  {scan.groups.length === 0 ? (
+                    <div className="state-panel" style={{ padding: '1.25rem 0' }}>
+                      <h2>All clear</h2>
+                      <p>No notable cleanup targets turned up.</p>
+                      <button type="button" className="btn btn-ghost" onClick={resetToIdle}>
+                        Back
+                      </button>
+                    </div>
+                  ) : (
+                    <GroupList
+                      groups={scan.groups}
+                      selected={selected}
+                      onToggleItem={toggleItem}
+                      onToggleGroup={toggleGroup}
+                    />
+                  )}
+                  <div className="actions" style={{ marginTop: '0.75rem' }}>
+                    <button type="button" className="btn btn-ghost" onClick={handleScan}>
+                      Scan again
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {phase === 'success' && (
+                <section className="panel state-panel" aria-live="polite">
+                  <div className="success-icon" aria-hidden="true">
+                    ✓
+                  </div>
+                  <h2>Space freed</h2>
+                  <p>
+                    About <strong>{formatBytes(freedBytes)}</strong> was cleared.
+                  </p>
+                  <div className="actions" style={{ justifyContent: 'center' }}>
+                    <button type="button" className="btn btn-primary" onClick={resetToIdle}>
+                      Done
+                    </button>
+                    <button type="button" className="btn btn-ghost" onClick={handleScan}>
+                      Scan again
+                    </button>
+                  </div>
+                </section>
+              )}
+            </>
           )}
 
-          {phase === 'success' && (
-            <section className="card state-panel" aria-live="polite">
-              <div className="success-icon" aria-hidden="true">
-                ✓
-              </div>
-              <h2>Space freed</h2>
-              <p>
-                About <strong>{formatBytes(freedBytes)}</strong> was cleared. Take a
-                breath — you’re done.
-              </p>
-              <div className="actions" style={{ justifyContent: 'center' }}>
-                <button type="button" className="btn btn-primary" onClick={resetToIdle}>
-                  Done
-                </button>
-                <button type="button" className="btn btn-ghost" onClick={handleScan}>
-                  Scan again
-                </button>
-              </div>
-            </section>
+          {tab === 'large' && (
+            <LargeFilesPanel
+              onError={setError}
+              selected={selected}
+              onToggle={toggleItem}
+              onToggleAll={toggleLargeAll}
+              result={largeResult}
+              onResult={(r) => {
+                setLargeResult(r);
+                if (r) void markScanned(r.scannedAt);
+              }}
+            />
           )}
-        </>
-      )}
 
-      {tab === 'large' && (
-        <LargeFilesPanel
-          onError={setError}
-          selected={selected}
-          onToggle={toggleItem}
-          onToggleAll={toggleLargeAll}
-          result={largeResult}
-          onResult={(r) => {
-            setLargeResult(r);
-            if (r) void markScanned(r.scannedAt);
-          }}
-        />
-      )}
+          {tab === 'prefs' && (
+            <PrefsPanel
+              prefs={{ ...prefs, theme }}
+              onSchedule={handleSchedule}
+              reminderBanner={showReminder}
+              onDismissReminder={dismissReminder}
+              onError={setError}
+            />
+          )}
 
-      {tab === 'prefs' && (
-        <PrefsPanel
-          prefs={{ ...prefs, theme }}
-          onSchedule={handleSchedule}
-          reminderBanner={showReminder}
-          onDismissReminder={dismissReminder}
-        />
-      )}
-
-      {error && (
-        <div className="error" role="alert">
-          {error}
-        </div>
-      )}
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+        </main>
+      </div>
 
       <div
         className={`footer-bar ${showClearBar ? 'visible' : ''}`}

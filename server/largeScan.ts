@@ -108,6 +108,7 @@ export async function findLargeItems(
               path: full,
               sizeBytes: st.size,
               kind: 'file',
+              mtimeMs: st.mtimeMs,
             });
           }
         } else if (ent.isDirectory()) {
@@ -115,6 +116,12 @@ export async function findLargeItems(
           const size = await dirSizeBytes(full, Math.min(5, maxDepth - depth + 2));
           if (size >= minBytes) {
             const cleanId = itemId('large', full);
+            let mtimeMs: number | undefined;
+            try {
+              mtimeMs = (await fs.promises.lstat(full)).mtimeMs;
+            } catch {
+              mtimeMs = undefined;
+            }
             found.push({
               id: cleanId,
               cleanId,
@@ -122,6 +129,7 @@ export async function findLargeItems(
               path: full,
               sizeBytes: size,
               kind: 'dir',
+              mtimeMs,
             });
           }
           if (depth < maxDepth) {
@@ -150,6 +158,7 @@ export async function findLargeItems(
         path: root,
         sizeBytes: st.size,
         kind: 'file',
+        mtimeMs: st.mtimeMs,
       });
     }
     if (truncated) break;
@@ -191,6 +200,78 @@ export function largeItemsToCleanItems(items: LargeItem[]): CleanItem[] {
   }));
 }
 
+
+
+/** List immediate children of a folder (bounded) for drill-in without delete. */
+export async function listDirChildren(
+  dirPath: string,
+  opts: { maxItems?: number; maxMs?: number } = {}
+): Promise<import('./types.js').ListDirResult> {
+  const maxItems = opts.maxItems ?? 120;
+  const maxMs = opts.maxMs ?? 8_000;
+  const started = Date.now();
+  const abs = path.resolve(dirPath);
+  const children: import('./types.js').DirChild[] = [];
+  let truncated = false;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(abs, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(
+      err instanceof Error ? err.message : 'Could not read folder'
+    );
+  }
+
+  for (const ent of entries) {
+    if (Date.now() - started > maxMs || children.length >= maxItems) {
+      truncated = true;
+      break;
+    }
+    if (ent.name === '.' || ent.name === '..') continue;
+    const full = path.join(abs, ent.name);
+    try {
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isFile()) {
+        const st = await fs.promises.lstat(full);
+        children.push({
+          name: ent.name,
+          path: full,
+          sizeBytes: st.size,
+          kind: 'file',
+          mtimeMs: st.mtimeMs,
+        });
+      } else if (ent.isDirectory()) {
+        const size = await dirSizeBytes(full, 3);
+        let mtimeMs: number | undefined;
+        try {
+          mtimeMs = (await fs.promises.lstat(full)).mtimeMs;
+        } catch {
+          mtimeMs = undefined;
+        }
+        children.push({
+          name: ent.name,
+          path: full,
+          sizeBytes: size,
+          kind: 'dir',
+          mtimeMs,
+        });
+      }
+    } catch {
+      /* skip */
+    }
+  }
+
+  children.sort((a, b) => b.sizeBytes - a.sizeBytes);
+
+  return {
+    path: abs,
+    truncated,
+    children,
+    demo: false,
+  };
+}
+
 export function demoLargeFind(): LargeFindResult {
   const home = homeDir();
   const items: LargeItem[] = [
@@ -201,6 +282,7 @@ export function demoLargeFind(): LargeFindResult {
       path: path.join(home, 'Downloads', 'ubuntu.iso'),
       sizeBytes: 5_800_000_000,
       kind: 'file',
+      mtimeMs: Date.now() - 90 * 86400000,
     },
     {
       id: itemId('large', path.join(home, 'Videos')),
@@ -209,6 +291,7 @@ export function demoLargeFind(): LargeFindResult {
       path: path.join(home, 'Videos'),
       sizeBytes: 12_400_000_000,
       kind: 'dir',
+      mtimeMs: Date.now() - 200 * 86400000,
     },
     {
       id: itemId('large', path.join(home, 'Downloads', 'dataset.zip')),
@@ -217,6 +300,7 @@ export function demoLargeFind(): LargeFindResult {
       path: path.join(home, 'Downloads', 'dataset.zip'),
       sizeBytes: 2_100_000_000,
       kind: 'file',
+      mtimeMs: Date.now() - 30 * 86400000,
     },
     {
       id: itemId('large', path.join(home, 'Projects', 'old-ml', 'checkpoints')),
@@ -225,6 +309,7 @@ export function demoLargeFind(): LargeFindResult {
       path: path.join(home, 'Projects', 'old-ml', 'checkpoints'),
       sizeBytes: 8_200_000_000,
       kind: 'dir',
+      mtimeMs: Date.now() - 400 * 86400000,
     },
   ];
   return {
