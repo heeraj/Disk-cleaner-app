@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   clearSelected,
   fetchDisk,
   fetchPrefs,
-  runScan,
+  runScanWithProgress,
   savePrefs,
+  ScanCancelledError,
 } from './api/client';
+import { AppTitleBar } from './components/AppTitleBar';
 import { ConfirmModal } from './components/ConfirmModal';
-import { DiskOverview } from './components/DiskOverview';
 import { GroupList } from './components/GroupList';
 import { LargeFilesPanel } from './components/LargeFilesPanel';
 import { PrefsPanel } from './components/PrefsPanel';
 import { PresetsBar } from './components/PresetsBar';
+import { ScanProgressBar } from './components/ScanProgressBar';
 import { useTheme } from './hooks/useTheme';
+import { isElectronShell, isFramelessChrome } from './desktop/api';
 import type {
   AppPrefs,
   CleanGroup,
@@ -21,6 +24,7 @@ import type {
   LargeItem,
   LastScanSummary,
   PresetId,
+  ScanProgress,
   ScanResult,
   ScheduleMode,
 } from './types';
@@ -80,8 +84,19 @@ export default function App() {
   const [lastSummary, setLastSummary] = useState<LastScanSummary | null>(() =>
     readSummary()
   );
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const scanAbortRef = useRef<AbortController | null>(null);
 
   const { theme, setTheme, toggle } = useTheme();
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (isElectronShell()) root.classList.add('electron-shell');
+    else root.classList.remove('electron-shell');
+    if (isFramelessChrome()) root.classList.add('frameless-chrome');
+    else root.classList.remove('frameless-chrome');
+  }, []);
 
   const loadDisk = useCallback(async () => {
     setDiskLoading(true);
@@ -206,8 +221,12 @@ export default function App() {
     setSelected(new Set());
     setScan(null);
     setActivePreset(null);
+    setScanProgress({ phase: 'start', percent: 0, message: 'Starting scan…' });
+    setCancelling(false);
+    const ac = new AbortController();
+    scanAbortRef.current = ac;
     try {
-      const result = await runScan();
+      const result = await runScanWithProgress((p) => setScanProgress(p), ac.signal);
       setScan(result);
       rememberCleanSummary(result);
       const safeIds = result.groups
@@ -217,9 +236,23 @@ export default function App() {
       setPhase('results');
       await markScanned(result.scannedAt);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Scan failed');
-      setPhase('idle');
+      if (e instanceof ScanCancelledError || (e instanceof Error && e.name === 'AbortError')) {
+        setPhase(scan ? 'results' : 'idle');
+        setError(null);
+      } else {
+        setError(e instanceof Error ? e.message : 'Scan failed');
+        setPhase('idle');
+      }
+    } finally {
+      scanAbortRef.current = null;
+      setScanProgress(null);
+      setCancelling(false);
     }
+  }
+
+  function cancelScan() {
+    setCancelling(true);
+    scanAbortRef.current?.abort();
   }
 
   function toggleItem(id: string) {
@@ -250,17 +283,28 @@ export default function App() {
     let groups = scan?.groups;
     if (!groups || phase !== 'results') {
       setPhase('scanning');
+      setScanProgress({ phase: 'start', percent: 0, message: 'Starting scan…' });
+      const ac = new AbortController();
+      scanAbortRef.current = ac;
       try {
-        const result = await runScan();
+        const result = await runScanWithProgress((p) => setScanProgress(p), ac.signal);
         setScan(result);
         rememberCleanSummary(result);
         groups = result.groups;
         setPhase('results');
         await markScanned(result.scannedAt);
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Scan failed');
-        setPhase('idle');
+        if (e instanceof ScanCancelledError || (e instanceof Error && e.name === 'AbortError')) {
+          setPhase('idle');
+        } else {
+          setError(e instanceof Error ? e.message : 'Scan failed');
+          setPhase('idle');
+        }
         return;
+      } finally {
+        scanAbortRef.current = null;
+        setScanProgress(null);
+        setCancelling(false);
       }
     }
 
@@ -352,37 +396,14 @@ export default function App() {
   const showClearBar = selected.size > 0 && (tab === 'clean' || tab === 'large');
 
   return (
-    <div className="app-shell">
-      <header className="titlebar">
-        <div className="titlebar-brand">
-          <span className="app-icon" aria-hidden="true">
-            ◧
-          </span>
-          <div>
-            <div className="app-name">Disk Cleaner</div>
-            <div className="app-sub">Local utility</div>
-          </div>
-        </div>
-        <DiskOverview disk={disk} loading={diskLoading} compact />
-        <div className="titlebar-actions">
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={toggle}
-            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
-          >
-            {theme === 'dark' ? '☀' : '☾'}
-          </button>
-          {demo ? (
-            <span className="badge demo" title="Using sample data">
-              Demo
-            </span>
-          ) : (
-            <span className="badge">Local</span>
-          )}
-        </div>
-      </header>
+    <div className={`app-shell ${isFramelessChrome() ? 'frameless' : ''}`}>
+      <AppTitleBar
+        disk={disk}
+        diskLoading={diskLoading}
+        theme={theme}
+        onToggleTheme={toggle}
+        demo={Boolean(demo)}
+      />
 
       <div className="app-body">
         <nav className="sidebar" aria-label="Main">
@@ -463,9 +484,12 @@ export default function App() {
 
               {phase === 'scanning' && (
                 <section className="panel state-panel" aria-live="polite" aria-busy="true">
-                  <div className="pulse" aria-hidden="true" />
                   <h2>Scanning…</h2>
-                  <p>Looking through common safe targets on this machine.</p>
+                  <ScanProgressBar
+                    progress={scanProgress}
+                    onCancel={cancelScan}
+                    cancelling={cancelling}
+                  />
                 </section>
               )}
 

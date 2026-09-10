@@ -11,6 +11,8 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8787',
         changeOrigin: true,
+        // Allow long-lived SSE scan streams
+        timeout: 0,
       },
     },
   },

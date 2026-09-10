@@ -4,6 +4,13 @@ A calm, Windows-style disk cleaner — scan → review → free space in under a
 
 Works as a **web app** (Vite + Express) and as a **standalone Electron desktop app** with native folder Browse and Open / Show in Explorer.
 
+## What's new in 1.3.0
+
+- **Unified frameless titlebar** with Mac-style traffic lights (close / minimize / maximize), drag region, and double-click to maximize — one chrome only in Electron.
+- **App icon** wired for Electron window + Windows `icon.ico` / electron-builder.
+- **Scan progress** via SSE for Clean and Large files (percent, current path, cancel).
+- **Large files settings** auto-collapse with a smooth animation when you hit Find; expand again anytime. Settings start expanded when you open the tab.
+
 ## Quick start (web)
 
 ```bash
@@ -135,7 +142,9 @@ In demo mode the API returns realistic sample disk usage and findings. Clear req
 | `GET` | `/api/health` | — | Liveness |
 | `GET` | `/api/disk` | — | Used / free / total |
 | `POST` | `/api/scan` | `{}` | Grouped findings |
+| `POST` | `/api/scan/stream` | `{}` (SSE) | Progress events + result |
 | `POST` | `/api/large-scan` | `{ roots?, minBytes?, maxDepth?, maxItems? }` | Largest files/folders |
+| `POST` | `/api/large-scan/stream` | same (SSE) | Progress events + result |
 | `GET` | `/api/large-roots` | — | Default roots that exist |
 | `POST` | `/api/list-dir` | `{ path }` | List children of one folder (drill-in) |
 | `POST` | `/api/clear` | `{ ids, confirm: true }` | Deletes only confirmed ids |

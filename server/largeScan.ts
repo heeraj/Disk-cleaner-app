@@ -7,6 +7,11 @@ import {
   itemId,
   pathExists,
 } from './fsutil.js';
+import {
+  makeAbortGate,
+  throttleProgress,
+  type ProgressReporter,
+} from './progress.js';
 
 export interface LargeScanOptions {
   roots?: string[];
@@ -14,6 +19,8 @@ export interface LargeScanOptions {
   maxDepth?: number;
   maxItems?: number;
   maxMs?: number;
+  onProgress?: ProgressReporter;
+  signal?: AbortSignal;
 }
 
 function displayPath(abs: string): string {
@@ -33,7 +40,6 @@ export async function defaultLargeRoots(): Promise<string[]> {
   for (const c of candidates) {
     if (await pathExists(c)) roots.push(c);
   }
-  // Prefer unique existing roots; if only home, that's fine
   return [...new Set(roots.map((r) => path.resolve(r)))];
 }
 
@@ -52,10 +58,14 @@ export async function findLargeItems(
     opts.roots && opts.roots.length > 0
       ? opts.roots.map((r) => path.resolve(r))
       : await defaultLargeRoots();
+  const report = throttleProgress(opts.onProgress);
+  const gate = makeAbortGate(opts.signal);
 
   const started = Date.now();
   const found: LargeItem[] = [];
   let truncated = false;
+  let filesSeen = 0;
+  let bytesSeen = 0;
 
   const skipNames = new Set([
     'node_modules',
@@ -68,7 +78,22 @@ export async function findLargeItems(
     'Trash',
   ]);
 
-  async function walk(dir: string, depth: number): Promise<void> {
+  function emit(phase: string, message: string, currentPath?: string, forcePercent?: number) {
+    gate.throwIfAborted();
+    const elapsed = Date.now() - started;
+    const timePct = Math.min(92, Math.round((elapsed / maxMs) * 100));
+    report({
+      phase,
+      percent: forcePercent ?? timePct,
+      currentPath,
+      filesSeen,
+      bytesSeen,
+      message,
+    });
+  }
+
+  async function walk(dir: string, depth: number, rootIndex: number, rootCount: number): Promise<void> {
+    gate.throwIfAborted();
     if (Date.now() - started > maxMs) {
       truncated = true;
       return;
@@ -82,13 +107,13 @@ export async function findLargeItems(
       return;
     }
 
+    emit('walk', `Scanning ${path.basename(dir) || dir}`, dir);
+
     for (const ent of entries) {
+      gate.throwIfAborted();
       if (Date.now() - started > maxMs) {
         truncated = true;
         return;
-      }
-      if (ent.name.startsWith('.') && depth === 0 && ent.name !== '.local') {
-        // Still allow walking home children; skip dotfiles at deeper levels for speed
       }
       if (skipNames.has(ent.name)) continue;
       if (ent.name.startsWith('.') && depth > 0) continue;
@@ -99,6 +124,8 @@ export async function findLargeItems(
 
         if (ent.isFile()) {
           const st = await fs.promises.lstat(full);
+          filesSeen += 1;
+          bytesSeen += st.size;
           if (st.size >= minBytes) {
             const cleanId = itemId('large', full);
             found.push({
@@ -110,10 +137,14 @@ export async function findLargeItems(
               kind: 'file',
               mtimeMs: st.mtimeMs,
             });
+            emit('found', `Found ${ent.name}`, full);
+          } else if (filesSeen % 25 === 0) {
+            emit('walk', `Scanning…`, full);
           }
         } else if (ent.isDirectory()) {
-          // Size this directory with a tight depth budget
           const size = await dirSizeBytes(full, Math.min(5, maxDepth - depth + 2));
+          filesSeen += 1;
+          bytesSeen += size;
           if (size >= minBytes) {
             const cleanId = itemId('large', full);
             let mtimeMs: number | undefined;
@@ -131,25 +162,36 @@ export async function findLargeItems(
               kind: 'dir',
               mtimeMs,
             });
+            emit('found', `Found folder ${ent.name}`, full);
           }
           if (depth < maxDepth) {
-            await walk(full, depth + 1);
+            await walk(full, depth + 1, rootIndex, rootCount);
           }
         }
       } catch {
         /* skip unreadable */
       }
     }
+
+    // Blend root progress into percent when time is low
+    void rootIndex;
+    void rootCount;
   }
 
-  for (const root of roots) {
+  emit('start', 'Starting large-item scan…', roots[0], 1);
+
+  for (let ri = 0; ri < roots.length; ri++) {
+    const root = roots[ri];
+    gate.throwIfAborted();
     if (!(await pathExists(root))) continue;
-    // Don't add the root itself as a hit; walk its children
+    emit('root', `Root ${ri + 1}/${roots.length}`, root, Math.round(((ri) / Math.max(1, roots.length)) * 10));
     const st = await fs.promises.lstat(root).catch(() => null);
     if (!st) continue;
     if (st.isDirectory()) {
-      await walk(root, 0);
+      await walk(root, 0, ri, roots.length);
     } else if (st.isFile() && st.size >= minBytes) {
+      filesSeen += 1;
+      bytesSeen += st.size;
       const cleanId = itemId('large', root);
       found.push({
         id: cleanId,
@@ -164,7 +206,9 @@ export async function findLargeItems(
     if (truncated) break;
   }
 
-  // Deduplicate by path (a large dir and its parent may both appear — keep larger unique paths)
+  gate.throwIfAborted();
+  emit('finalize', 'Sorting results…', undefined, 95);
+
   const byPath = new Map<string, LargeItem>();
   for (const item of found) {
     const prev = byPath.get(item.path);
@@ -176,6 +220,14 @@ export async function findLargeItems(
     .slice(0, maxItems);
 
   if (byPath.size > maxItems) truncated = true;
+
+  report({
+    phase: 'done',
+    percent: 100,
+    filesSeen,
+    bytesSeen,
+    message: 'Scan complete',
+  });
 
   return {
     scannedAt: new Date().toISOString(),
@@ -199,8 +251,6 @@ export function largeItemsToCleanItems(items: LargeItem[]): CleanItem[] {
     description: `${item.kind === 'dir' ? 'Folder' : 'File'} · ${displayPath(item.path)}`,
   }));
 }
-
-
 
 /** List immediate children of a folder (bounded) for drill-in without delete. */
 export async function listDirChildren(

@@ -1,10 +1,21 @@
+export interface WindowControlsAPI {
+  minimize: () => Promise<void>;
+  maximizeToggle: () => Promise<{ maximized: boolean }>;
+  close: () => Promise<void>;
+  isMaximized: () => Promise<{ maximized: boolean }>;
+  onMaximizedChange?: (cb: (maximized: boolean) => void) => () => void;
+}
+
 export interface DiskCleanerDesktopAPI {
   isElectron: boolean;
   platform: string;
+  /** Frameless Electron shell with custom titlebar. */
+  frameless?: boolean;
   pickDirectory: () => Promise<string | null>;
   openPath: (target: string) => Promise<string>;
   showItemInFolder: (target: string) => Promise<void>;
   emptyRecycleBin?: () => Promise<{ ok: boolean; error?: string }>;
+  windowControls?: WindowControlsAPI;
 }
 
 declare global {
@@ -18,6 +29,16 @@ export function getDesktopAPI(): DiskCleanerDesktopAPI | null {
   const api = window.diskCleaner;
   if (api && api.isElectron) return api;
   return null;
+}
+
+export function isElectronShell(): boolean {
+  return Boolean(getDesktopAPI());
+}
+
+/** Custom title bar is the only chrome (frameless). */
+export function isFramelessChrome(): boolean {
+  const api = getDesktopAPI();
+  return Boolean(api?.frameless && api.windowControls);
 }
 
 export function canBrowseFolders(): boolean {

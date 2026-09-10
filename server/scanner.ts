@@ -9,6 +9,12 @@ import {
   listFiles,
   pathExists,
 } from './fsutil.js';
+import {
+  makeAbortGate,
+  throttleProgress,
+  type ProgressReporter,
+  type ScanProgress,
+} from './progress.js';
 
 const CATEGORY_META: Record<
   Exclude<CategoryId, 'large-files'>,
@@ -63,20 +69,82 @@ function matchesSafeTmp(name: string): boolean {
   );
 }
 
-export async function liveScan(): Promise<ScanResult> {
+export interface LiveScanOptions {
+  onProgress?: ProgressReporter;
+  signal?: AbortSignal;
+}
+
+export async function liveScan(opts: LiveScanOptions = {}): Promise<ScanResult> {
+  const report = throttleProgress(opts.onProgress);
+  const gate = makeAbortGate(opts.signal);
   const items: CleanItem[] = [];
   const home = homeDir();
+  let filesSeen = 0;
+  let bytesSeen = 0;
 
+  const phases: { id: string; label: string; weight: number }[] = [
+    { id: 'caches', label: 'Scanning caches…', weight: 30 },
+    { id: 'temp', label: 'Scanning temporary files…', weight: 15 },
+    { id: 'trash', label: 'Checking trash…', weight: 10 },
+    { id: 'downloads', label: 'Scanning downloads…', weight: 20 },
+    { id: 'build', label: 'Looking for build artifacts…', weight: 20 },
+    { id: 'finalize', label: 'Finishing…', weight: 5 },
+  ];
+  const totalWeight = phases.reduce((s, p) => s + p.weight, 0);
+  let completedWeight = 0;
+
+  function emit(
+    phaseId: string,
+    label: string,
+    extra: Partial<ScanProgress> = {}
+  ) {
+    gate.throwIfAborted();
+    const phaseMeta = phases.find((p) => p.id === phaseId);
+    const within = Math.min(1, (extra.percent ?? 0) / 100);
+    const base = completedWeight;
+    const slice = phaseMeta?.weight ?? 0;
+    const percent = Math.min(
+      99,
+      Math.round(((base + slice * within) / totalWeight) * 100)
+    );
+    report({
+      phase: phaseId,
+      percent: extra.percent === 100 && phaseId === 'finalize' ? 100 : percent,
+      filesSeen,
+      bytesSeen,
+      message: label,
+      ...extra,
+      currentPath: extra.currentPath,
+    });
+  }
+
+  function note(pathStr: string, size: number) {
+    filesSeen += 1;
+    bytesSeen += size;
+  }
+
+  // --- caches ---
+  emit('caches', 'Scanning caches…', { percent: 0, currentPath: path.join(home, '.cache') });
   const cacheRoot = path.join(home, '.cache');
   if (await pathExists(cacheRoot)) {
     try {
       const entries = await fs.promises.readdir(cacheRoot, { withFileTypes: true });
+      let i = 0;
       for (const ent of entries) {
+        gate.throwIfAborted();
         if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
         if (['keyrings', 'ms-playwright', 'puppeteer'].includes(ent.name)) continue;
         const full = path.join(cacheRoot, ent.name);
+        emit('caches', `Cache: ${ent.name}`, {
+          percent: Math.round((i / Math.max(1, entries.length)) * 70),
+          currentPath: full,
+        });
         const size = await dirSizeBytes(full, 5);
-        if (size < 5 * 1024 * 1024) continue;
+        note(full, size);
+        if (size < 5 * 1024 * 1024) {
+          i++;
+          continue;
+        }
         items.push({
           id: itemId('cache', full),
           name: `Cache: ${ent.name}`,
@@ -86,13 +154,13 @@ export async function liveScan(): Promise<ScanResult> {
           safety: 'safe',
           description: displayPath(full),
         });
+        i++;
       }
     } catch {
       /* ignore */
     }
   }
 
-  // Browser-ish caches often live under ~/.cache — also check common Chromium/Firefox paths
   const browserCacheHints = [
     path.join(home, '.cache', 'google-chrome'),
     path.join(home, '.cache', 'chromium'),
@@ -100,9 +168,12 @@ export async function liveScan(): Promise<ScanResult> {
     path.join(home, '.mozilla', 'firefox'),
   ];
   for (const full of browserCacheHints) {
+    gate.throwIfAborted();
     if (!(await pathExists(full))) continue;
-    if (items.some((i) => i.path === full)) continue;
+    if (items.some((it) => it.path === full)) continue;
+    emit('caches', 'Browser caches…', { percent: 80, currentPath: full });
     const size = await dirSizeBytes(full, 4);
+    note(full, size);
     if (size < 5 * 1024 * 1024) continue;
     items.push({
       id: itemId('cache', full),
@@ -117,7 +188,10 @@ export async function liveScan(): Promise<ScanResult> {
 
   const npmCache = path.join(home, '.npm');
   if (await pathExists(npmCache)) {
+    gate.throwIfAborted();
+    emit('caches', 'npm cache…', { percent: 90, currentPath: npmCache });
     const size = await dirSizeBytes(npmCache, 5);
+    note(npmCache, size);
     if (size >= 5 * 1024 * 1024) {
       items.push({
         id: itemId('cache', npmCache),
@@ -132,8 +206,11 @@ export async function liveScan(): Promise<ScanResult> {
   }
 
   const pipCache = path.join(home, '.cache', 'pip');
-  if (await pathExists(pipCache) && !items.some((i) => i.path === pipCache)) {
+  if (await pathExists(pipCache) && !items.some((it) => it.path === pipCache)) {
+    gate.throwIfAborted();
+    emit('caches', 'pip cache…', { percent: 95, currentPath: pipCache });
     const size = await dirSizeBytes(pipCache, 4);
+    note(pipCache, size);
     if (size >= 5 * 1024 * 1024) {
       items.push({
         id: itemId('cache', pipCache),
@@ -146,17 +223,30 @@ export async function liveScan(): Promise<ScanResult> {
       });
     }
   }
+  completedWeight += 30;
 
+  // --- temp ---
+  emit('temp', 'Scanning temporary files…', { percent: 0, currentPath: '/tmp' });
   if (await pathExists('/tmp')) {
     try {
       const entries = await fs.promises.readdir('/tmp', { withFileTypes: true });
+      let i = 0;
       for (const ent of entries) {
+        gate.throwIfAborted();
         if (!matchesSafeTmp(ent.name)) continue;
         const full = path.join('/tmp', ent.name);
+        emit('temp', ent.name, {
+          percent: Math.round((i / Math.max(1, entries.length)) * 100),
+          currentPath: full,
+        });
         let size = 0;
         if (ent.isDirectory()) size = await dirSizeBytes(full, 4);
         else if (ent.isFile()) size = await fileSizeBytes(full);
-        if (size < 256 * 1024) continue;
+        note(full, size);
+        if (size < 256 * 1024) {
+          i++;
+          continue;
+        }
         items.push({
           id: itemId('temp', full),
           name: ent.name,
@@ -166,15 +256,22 @@ export async function liveScan(): Promise<ScanResult> {
           safety: 'safe',
           description: 'Temporary leftover',
         });
+        i++;
       }
     } catch {
       /* ignore */
     }
   }
+  completedWeight += 15;
 
+  // --- trash ---
+  emit('trash', 'Checking trash…', { percent: 0 });
   const trashFiles = path.join(home, '.local', 'share', 'Trash', 'files');
   if (await pathExists(trashFiles)) {
+    gate.throwIfAborted();
+    emit('trash', 'Trash contents…', { percent: 40, currentPath: trashFiles });
     const size = await dirSizeBytes(trashFiles, 6);
+    note(trashFiles, size);
     if (size > 0) {
       items.push({
         id: itemId('trash', trashFiles),
@@ -187,14 +284,22 @@ export async function liveScan(): Promise<ScanResult> {
       });
     }
   }
+  completedWeight += 10;
 
+  // --- downloads ---
+  emit('downloads', 'Scanning downloads…', { percent: 0 });
   const downloads = path.join(home, 'Downloads');
   if (await pathExists(downloads)) {
+    gate.throwIfAborted();
+    emit('downloads', 'Large downloads…', { percent: 20, currentPath: downloads });
     const large = await listFiles(downloads, {
       minBytes: 20 * 1024 * 1024,
       maxEntries: 15,
     });
     for (const f of large) {
+      gate.throwIfAborted();
+      note(f.path, f.sizeBytes);
+      emit('downloads', f.name, { percent: 60, currentPath: f.path });
       items.push({
         id: itemId('dl', f.path),
         name: f.name,
@@ -206,22 +311,37 @@ export async function liveScan(): Promise<ScanResult> {
       });
     }
   }
+  completedWeight += 20;
 
+  // --- build artifacts ---
+  emit('build', 'Looking for build artifacts…', { percent: 0 });
   const workspaceCandidates = [
     '/workspace',
     path.join(home, 'Projects'),
     path.join(home, 'projects'),
   ];
   for (const root of workspaceCandidates) {
+    gate.throwIfAborted();
     if (!(await pathExists(root))) continue;
     try {
+      emit('build', root, { percent: 10, currentPath: root });
       const top = await fs.promises.readdir(root, { withFileTypes: true });
+      let i = 0;
       for (const ent of top) {
+        gate.throwIfAborted();
         if (!ent.isDirectory()) continue;
         const nm = path.join(root, ent.name, 'node_modules');
         if (!(await pathExists(nm))) continue;
+        emit('build', `${ent.name}/node_modules`, {
+          percent: Math.round((i / Math.max(1, top.length)) * 100),
+          currentPath: nm,
+        });
         const size = await dirSizeBytes(nm, 4);
-        if (size < 10 * 1024 * 1024) continue;
+        note(nm, size);
+        if (size < 10 * 1024 * 1024) {
+          i++;
+          continue;
+        }
         items.push({
           id: itemId('build', nm),
           name: `${ent.name}/node_modules`,
@@ -231,11 +351,16 @@ export async function liveScan(): Promise<ScanResult> {
           safety: 'review',
           description: displayPath(nm),
         });
+        i++;
       }
     } catch {
       /* ignore */
     }
   }
+  completedWeight += 20;
+
+  emit('finalize', 'Grouping results…', { percent: 50 });
+  gate.throwIfAborted();
 
   const byCat = new Map<CategoryId, CleanItem[]>();
   for (const item of items) {
@@ -268,6 +393,15 @@ export async function liveScan(): Promise<ScanResult> {
       items: list,
     });
   }
+
+  completedWeight += 5;
+  report({
+    phase: 'done',
+    percent: 100,
+    filesSeen,
+    bytesSeen,
+    message: 'Scan complete',
+  });
 
   return {
     scannedAt: new Date().toISOString(),
@@ -309,3 +443,5 @@ export function getRememberedItems(ids: string[]): CleanItem[] {
 export function seedRemembered(items: CleanItem[]): void {
   for (const item of items) lastScanItems.set(item.id, item);
 }
+
+// silence unused type import warning in some tsc configs

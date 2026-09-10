@@ -117,3 +117,13 @@ export interface LastScanSummary {
   groupCount: number;
   itemCount: number;
 }
+
+
+export interface ScanProgress {
+  phase: string;
+  percent?: number;
+  currentPath?: string;
+  filesSeen?: number;
+  bytesSeen?: number;
+  message?: string;
+}

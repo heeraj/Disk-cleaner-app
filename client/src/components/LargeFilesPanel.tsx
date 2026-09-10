@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
-import { fetchLargeRoots, listDirectory, runLargeScan } from '../api/client';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  fetchLargeRoots,
+  listDirectory,
+  runLargeScanWithProgress,
+  ScanCancelledError,
+} from '../api/client';
 import {
   browseForFolder,
   canBrowseFolders,
   canRevealInExplorer,
 } from '../desktop/api';
-import type { DirChild, LargeFindResult, LargeItem } from '../types';
+import type { DirChild, LargeFindResult, LargeItem, ScanProgress } from '../types';
 import { formatBytes } from '../utils';
 import { PathActions } from './PathActions';
+import { ScanProgressBar } from './ScanProgressBar';
 
 interface Props {
   onError: (msg: string | null) => void;
@@ -40,6 +46,10 @@ function formatAge(mtimeMs?: number): string {
   return `${Math.floor(months / 12)} yr old`;
 }
 
+function minLabel(bytes: number): string {
+  return MIN_OPTIONS.find((o) => o.value === bytes)?.label ?? formatBytes(bytes);
+}
+
 export function LargeFilesPanel({
   onError,
   selected,
@@ -59,6 +69,11 @@ export function LargeFilesPanel({
   const [drillChildren, setDrillChildren] = useState<DirChild[] | null>(null);
   const [drillTruncated, setDrillTruncated] = useState(false);
   const [drilling, setDrilling] = useState(false);
+  /** Expanded on first enter / mount; collapses when a scan starts. */
+  const [settingsOpen, setSettingsOpen] = useState(true);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const hasBrowse = canBrowseFolders();
   const hasReveal = canRevealInExplorer();
 
@@ -156,22 +171,43 @@ export function LargeFilesPanel({
   async function handleScan() {
     onError(null);
     setScanning(true);
+    setSettingsOpen(false);
     onResult(null);
     setDrillPath(null);
     setDrillChildren(null);
+    setScanProgress({ phase: 'start', percent: 0, message: 'Starting…' });
+    setCancelling(false);
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
-      const data = await runLargeScan({
-        roots: Array.from(chosen),
-        minBytes,
-        maxDepth: 4,
-        maxItems: 80,
-      });
+      const data = await runLargeScanWithProgress(
+        {
+          roots: Array.from(chosen),
+          minBytes,
+          maxDepth: 4,
+          maxItems: 80,
+        },
+        (p) => setScanProgress(p),
+        ac.signal
+      );
       onResult(data);
     } catch (e) {
-      onError(e instanceof Error ? e.message : 'Large scan failed');
+      if (e instanceof ScanCancelledError || (e instanceof Error && e.name === 'AbortError')) {
+        onError(null);
+      } else {
+        onError(e instanceof Error ? e.message : 'Large scan failed');
+      }
     } finally {
+      abortRef.current = null;
       setScanning(false);
+      setScanProgress(null);
+      setCancelling(false);
     }
+  }
+
+  function cancelScan() {
+    setCancelling(true);
+    abortRef.current?.abort();
   }
 
   async function openDrill(folderPath: string) {
@@ -225,90 +261,114 @@ export function LargeFilesPanel({
         Open / Show in Explorer before deleting anything large.
       </p>
 
-      <div className="field-row">
-        <label className="field">
-          <span>Minimum size</span>
-          <select
-            value={minBytes}
-            onChange={(e) => setMinBytes(Number(e.target.value))}
-            disabled={scanning}
-          >
-            {MIN_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className="roots-list" role="group" aria-label="Scan roots">
-        {roots.map((root) => (
-          <div key={root} className="root-chip">
-            <label className="root-chip-label">
-              <input
-                type="checkbox"
-                className="check"
-                checked={chosen.has(root)}
-                onChange={() => toggleRoot(root)}
-                disabled={scanning}
-              />
-              <span title={root}>{root}</span>
-            </label>
-            <button
-              type="button"
-              className="btn-row"
-              title="Remove root"
-              aria-label={`Remove ${root}`}
-              disabled={scanning}
-              onClick={() => removeRoot(root)}
-            >
-              ✕
-            </button>
-          </div>
-        ))}
-        {roots.length === 0 && (
-          <p className="note">No roots yet — browse or type a folder path.</p>
-        )}
-      </div>
-
-      <div className="add-root">
-        <input
-          type="text"
-          placeholder="Add another root path…"
-          value={customRoot}
-          onChange={(e) => setCustomRoot(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') addCustomRoot();
-          }}
-          disabled={scanning}
-          aria-label="Custom root path"
-        />
-        {hasBrowse && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={handleBrowse}
-            disabled={scanning}
-          >
-            Browse…
-          </button>
-        )}
+      <div className={`settings-fold ${settingsOpen ? 'open' : 'closed'}`}>
         <button
           type="button"
-          className="btn btn-ghost"
-          onClick={addCustomRoot}
-          disabled={scanning || !customRoot.trim()}
+          className="settings-fold-header"
+          aria-expanded={settingsOpen}
+          onClick={() => setSettingsOpen((o) => !o)}
         >
-          Add
+          <span className="settings-fold-title">Scan settings</span>
+          <span className="settings-fold-chips" aria-hidden={!settingsOpen ? undefined : true}>
+            <span className="chip summary">{minLabel(minBytes)}+</span>
+            <span className="chip summary">
+              {chosen.size} root{chosen.size === 1 ? '' : 's'}
+            </span>
+          </span>
+          <span className={`chevron ${settingsOpen ? 'up' : 'down'}`} aria-hidden="true">
+            ▾
+          </span>
         </button>
+
+        <div className="settings-fold-grid" aria-hidden={!settingsOpen}>
+          <div className="settings-fold-inner">
+            <div className="field-row">
+              <label className="field">
+                <span>Minimum size</span>
+                <select
+                  value={minBytes}
+                  onChange={(e) => setMinBytes(Number(e.target.value))}
+                  disabled={scanning}
+                >
+                  {MIN_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="roots-list" role="group" aria-label="Scan roots">
+              {roots.map((root) => (
+                <div key={root} className="root-chip">
+                  <label className="root-chip-label">
+                    <input
+                      type="checkbox"
+                      className="check"
+                      checked={chosen.has(root)}
+                      onChange={() => toggleRoot(root)}
+                      disabled={scanning}
+                    />
+                    <span title={root}>{root}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-row"
+                    title="Remove root"
+                    aria-label={`Remove ${root}`}
+                    disabled={scanning}
+                    onClick={() => removeRoot(root)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {roots.length === 0 && (
+                <p className="note">No roots yet — browse or type a folder path.</p>
+              )}
+            </div>
+
+            <div className="add-root">
+              <input
+                type="text"
+                placeholder="Add another root path…"
+                value={customRoot}
+                onChange={(e) => setCustomRoot(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addCustomRoot();
+                }}
+                disabled={scanning}
+                aria-label="Custom root path"
+              />
+              {hasBrowse && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={handleBrowse}
+                  disabled={scanning}
+                >
+                  Browse…
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={addCustomRoot}
+                disabled={scanning || !customRoot.trim()}
+              >
+                Add
+              </button>
+            </div>
+            {!hasBrowse && (
+              <p className="note">
+                Folder Browse is available in the Electron desktop app. In the browser,
+                type a path.
+              </p>
+            )}
+          </div>
+        </div>
       </div>
-      {!hasBrowse && (
-        <p className="note">
-          Folder Browse is available in the Electron desktop app. In the browser,
-          type a path.
-        </p>
-      )}
 
       <div className="actions">
         <button
@@ -319,13 +379,24 @@ export function LargeFilesPanel({
         >
           {scanning ? 'Scanning…' : 'Find large items'}
         </button>
+        {!settingsOpen && !scanning && (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => setSettingsOpen(true)}
+          >
+            Edit settings
+          </button>
+        )}
       </div>
 
       {scanning && (
-        <div className="inline-scan" aria-live="polite" aria-busy="true">
-          <div className="pulse sm" aria-hidden="true" />
-          <span>Walking selected roots (bounded)…</span>
-        </div>
+        <ScanProgressBar
+          progress={scanProgress}
+          onCancel={cancelScan}
+          cancelling={cancelling}
+          compact
+        />
       )}
 
       {!scanning && !result && (

@@ -187,6 +187,31 @@ function registerIpc() {
     shell.showItemInFolder(target);
   });
 
+  function targetWindow(event) {
+    return BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  }
+
+  ipcMain.handle('window:minimize', (event) => {
+    targetWindow(event)?.minimize();
+  });
+
+  ipcMain.handle('window:maximizeToggle', (event) => {
+    const win = targetWindow(event);
+    if (!win) return { maximized: false };
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return { maximized: win.isMaximized() };
+  });
+
+  ipcMain.handle('window:close', (event) => {
+    targetWindow(event)?.close();
+  });
+
+  ipcMain.handle('window:isMaximized', (event) => {
+    const win = targetWindow(event);
+    return { maximized: Boolean(win?.isMaximized()) };
+  });
+
   ipcMain.handle('recycle:empty', async () => {
     if (process.platform !== 'win32') {
       return { ok: false, error: 'Empty Recycle Bin is only available on Windows' };
@@ -221,7 +246,20 @@ function registerIpc() {
   });
 }
 
+function resolveAppIcon() {
+  const res = path.join(__dirname, 'resources');
+  if (process.platform === 'win32') {
+    const ico = path.join(res, 'icon.ico');
+    if (fs.existsSync(ico)) return ico;
+  }
+  const png = path.join(res, 'icon.png');
+  return fs.existsSync(png) ? png : undefined;
+}
+
 async function createWindow() {
+  const iconPath = resolveAppIcon();
+
+  // Frameless: one unified in-app titlebar (Mac-style traffic lights in renderer).
   mainWindow = new BrowserWindow({
     width: 980,
     height: 720,
@@ -231,6 +269,9 @@ async function createWindow() {
     title: 'Disk Cleaner',
     backgroundColor: '#f3f3f3',
     autoHideMenuBar: true,
+    frame: false,
+    transparent: false,
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -238,6 +279,15 @@ async function createWindow() {
       sandbox: true,
     },
   });
+
+  const notifyMaximized = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('window:maximized', {
+      maximized: mainWindow.isMaximized(),
+    });
+  };
+  mainWindow.on('maximize', notifyMaximized);
+  mainWindow.on('unmaximize', notifyMaximized);
 
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
