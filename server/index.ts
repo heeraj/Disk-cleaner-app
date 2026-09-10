@@ -494,8 +494,8 @@ app.get('*', (req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '127.0.0.1', () => {
   console.log(
-    `[disk-cleaner] API on http://localhost:${PORT}  DEMO_MODE=${DEMO_MODE}`
+    `[disk-cleaner] API on http://127.0.0.1:${PORT}  DEMO_MODE=${DEMO_MODE}`
   );
 });

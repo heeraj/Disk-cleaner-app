@@ -1,5 +1,14 @@
 # Disk Cleaner
 
+
+**Author:** Asjau (GTR) · **Contact:** [mail.asjau@gmail.com](mailto:mail.asjau@gmail.com)
+
+## Legal & contact
+- [Changelog](CHANGELOG.md) — what's new by version
+- [Privacy Policy](PRIVACY.md) — local-only design
+- [Disclaimer](DISCLAIMER.md) — use carefully; confirm before delete
+- [Contact](CONTACT.md)
+
 A calm, Windows-style disk cleaner — scan → review → free space in under a minute.
 
 Works as a **web app** (Vite + Express) and as a **standalone Electron desktop app** with native folder Browse and Open / Show in Explorer.
@@ -164,3 +173,7 @@ In demo mode the API returns realistic sample disk usage and findings. Clear req
 - Live regions for scanning / success / errors
 - Progressbar semantics on the disk usage bar
 - Theme toggle with accessible label
+
+
+## Windows Firewall note
+DiskCleaner talks to itself on `127.0.0.1` only. If Windows Firewall prompts, you can cancel safely for local use, or allow — from 1.3.0 the listen address is localhost-only to avoid needless prompts. Each newly built `.exe` path may still trigger a one-time prompt.
