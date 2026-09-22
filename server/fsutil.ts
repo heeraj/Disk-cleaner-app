@@ -148,6 +148,136 @@ export async function listFiles(
   }
 }
 
+
+/**
+ * Skip symlinks / junctions / mount points so scans do not follow reparse
+ * points (avoids inflated totals across volumes). Uses lstat; safe on Linux.
+ */
+export async function isSkippedLinkOrReparse(target: string): Promise<boolean> {
+  try {
+    const st = await fs.promises.lstat(target);
+    if (st.isSymbolicLink()) return true;
+    // Windows: DIRECTORY + REPARSE_POINT (junction / mount point). Node exposes
+    // isSymbolicLink for symlinks; junctions may appear as directories with
+    // the reparse bit. Detect via stats mode when available.
+    const anySt = st as fs.Stats & { isReparsePoint?: () => boolean };
+    if (typeof anySt.isReparsePoint === 'function' && anySt.isReparsePoint()) {
+      return true;
+    }
+    // Windows dirent attribute fallback: FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    if (process.platform === 'win32' && (st.mode & 0o000) === 0) {
+      // mode may not carry Win attrs; check via readlink-style: if lstat says
+      // directory but realpath differs from path, treat carefully — skip only
+      // when we can detect. Prefer checking readlink.
+      try {
+        await fs.promises.readlink(target);
+        return true; // any link target means reparse/symlink
+      } catch {
+        /* not a link */
+      }
+    }
+    return false;
+  } catch {
+    return true; // unreadable → skip
+  }
+}
+
+export interface VolumeInfo {
+  path: string;
+  label: string;
+  totalBytes?: number;
+  freeBytes?: number;
+}
+
+/** List local volumes / mount roots for the drive picker. */
+export async function listVolumes(): Promise<VolumeInfo[]> {
+  if (process.platform === 'win32') {
+    const vols: VolumeInfo[] = [];
+    for (const letter of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
+      const root = `${letter}:\\`;
+      try {
+        await fs.promises.access(root);
+        let totalBytes: number | undefined;
+        let freeBytes: number | undefined;
+        try {
+          const u = await getDiskUsage(root);
+          totalBytes = u.totalBytes;
+          freeBytes = u.freeBytes;
+        } catch {
+          /* ignore */
+        }
+        vols.push({ path: root, label: `${letter}:`, totalBytes, freeBytes });
+      } catch {
+        /* drive not present */
+      }
+    }
+    return vols;
+  }
+
+  // Linux / macOS: common mount points + df
+  const candidates = ['/', '/home', '/mnt', '/media', '/Volumes'];
+  const seen = new Set<string>();
+  const vols: VolumeInfo[] = [];
+  for (const c of candidates) {
+    try {
+      await fs.promises.access(c);
+      const resolved = path.resolve(c);
+      if (seen.has(resolved)) continue;
+      seen.add(resolved);
+      let totalBytes: number | undefined;
+      let freeBytes: number | undefined;
+      try {
+        const u = await getDiskUsage(c);
+        totalBytes = u.totalBytes;
+        freeBytes = u.freeBytes;
+      } catch {
+        /* ignore */
+      }
+      vols.push({
+        path: resolved,
+        label: c === '/' ? 'Root (/)' : path.basename(c) || c,
+        totalBytes,
+        freeBytes,
+      });
+    } catch {
+      /* missing */
+    }
+  }
+  // Also try listing /mnt and /media children
+  for (const base of ['/mnt', '/media', '/Volumes']) {
+    try {
+      const ents = await fs.promises.readdir(base, { withFileTypes: true });
+      for (const ent of ents) {
+        if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
+        const full = path.join(base, ent.name);
+        const resolved = path.resolve(full);
+        if (seen.has(resolved)) continue;
+        // Skip pure symlinks pointing elsewhere if we cannot stat
+        try {
+          const st = await fs.promises.lstat(full);
+          if (st.isSymbolicLink()) continue;
+        } catch {
+          continue;
+        }
+        seen.add(resolved);
+        let totalBytes: number | undefined;
+        let freeBytes: number | undefined;
+        try {
+          const u = await getDiskUsage(full);
+          totalBytes = u.totalBytes;
+          freeBytes = u.freeBytes;
+        } catch {
+          /* ignore */
+        }
+        vols.push({ path: resolved, label: ent.name, totalBytes, freeBytes });
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return vols;
+}
+
 /** Hash a path into a stable id */
 export function itemId(prefix: string, p: string): string {
   let h = 0;

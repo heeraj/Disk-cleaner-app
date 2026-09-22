@@ -61,6 +61,16 @@ export interface LargeItem {
   cleanId: string;
   /** Modification time (ms since epoch), when available */
   mtimeMs?: number;
+  /** Inclusive size (same as sizeBytes; folders include descendants). */
+  inclusiveBytes: number;
+  /** Non-overlapping contribution when this item is in the result set. */
+  uniqueBytes: number;
+  /** Another listed result is nested under this path. */
+  hasListedDescendants: boolean;
+  /** A listed ancestor covers this path — excluded from unique totals. */
+  coveredByAncestor: boolean;
+  /** Path depth under the filesystem root (for indent / tree view). */
+  depth: number;
 }
 
 export interface LargeFindResult {
@@ -70,7 +80,10 @@ export interface LargeFindResult {
   minBytes: number;
   truncated: boolean;
   items: LargeItem[];
+  /** Raw sum of inclusive sizes (may double-count nested paths). */
   totalBytes: number;
+  /** Non-overlapping reclaimable total (nested overlap removed). */
+  uniqueTotalBytes: number;
 }
 
 export interface DirChild {
@@ -96,6 +109,10 @@ export interface AppPrefs {
   schedule: ScheduleMode;
   lastScanAt: string | null;
   lastReminderAt: string | null;
+  /** Last large-scan roots (remembered between sessions). */
+  lastLargeRoots: string[] | null;
+  /** Last large-scan minimum size in bytes. */
+  lastLargeMinBytes: number | null;
 }
 
 export type PresetId =
@@ -126,4 +143,12 @@ export interface ScanProgress {
   filesSeen?: number;
   bytesSeen?: number;
   message?: string;
+}
+
+
+export interface VolumeInfo {
+  path: string;
+  label: string;
+  totalBytes?: number;
+  freeBytes?: number;
 }

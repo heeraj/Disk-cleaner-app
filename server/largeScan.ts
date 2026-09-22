@@ -4,9 +4,11 @@ import type { CleanItem, LargeFindResult, LargeItem } from './types.js';
 import {
   dirSizeBytes,
   homeDir,
+  isSkippedLinkOrReparse,
   itemId,
   pathExists,
 } from './fsutil.js';
+import { annotateHierarchy, uniqueBytesTotal } from './hierarchy.js';
 import {
   makeAbortGate,
   throttleProgress,
@@ -51,9 +53,9 @@ export async function findLargeItems(
   opts: LargeScanOptions = {}
 ): Promise<LargeFindResult> {
   const minBytes = opts.minBytes ?? 50 * 1024 * 1024;
-  const maxDepth = opts.maxDepth ?? 4;
-  const maxItems = opts.maxItems ?? 80;
-  const maxMs = opts.maxMs ?? 12_000;
+  const maxDepth = opts.maxDepth ?? 5;
+  const maxItems = opts.maxItems ?? 150;
+  const maxMs = opts.maxMs ?? 30_000;
   const roots =
     opts.roots && opts.roots.length > 0
       ? opts.roots.map((r) => path.resolve(r))
@@ -62,7 +64,8 @@ export async function findLargeItems(
   const gate = makeAbortGate(opts.signal);
 
   const started = Date.now();
-  const found: LargeItem[] = [];
+  type RawLarge = Omit<LargeItem, 'inclusiveBytes' | 'uniqueBytes' | 'hasListedDescendants' | 'coveredByAncestor' | 'depth'>;
+  const found: RawLarge[] = [];
   let truncated = false;
   let filesSeen = 0;
   let bytesSeen = 0;
@@ -120,7 +123,8 @@ export async function findLargeItems(
 
       const full = path.join(dir, ent.name);
       try {
-        if (ent.isSymbolicLink()) continue;
+        // Skip symlinks / junctions / reparse points (do not follow mounts).
+        if (ent.isSymbolicLink() || (await isSkippedLinkOrReparse(full))) continue;
 
         if (ent.isFile()) {
           const st = await fs.promises.lstat(full);
@@ -209,7 +213,7 @@ export async function findLargeItems(
   gate.throwIfAborted();
   emit('finalize', 'Sorting results…', undefined, 95);
 
-  const byPath = new Map<string, LargeItem>();
+  const byPath = new Map<string, RawLarge>();
   for (const item of found) {
     const prev = byPath.get(item.path);
     if (!prev || item.sizeBytes > prev.sizeBytes) byPath.set(item.path, item);
@@ -229,14 +233,30 @@ export async function findLargeItems(
     message: 'Scan complete',
   });
 
+  const annotated = annotateHierarchy(items).map((a) => ({
+    id: a.id,
+    name: a.name,
+    path: a.path,
+    sizeBytes: a.sizeBytes,
+    kind: a.kind,
+    cleanId: a.cleanId,
+    mtimeMs: a.mtimeMs,
+    inclusiveBytes: a.inclusiveBytes,
+    uniqueBytes: a.uniqueBytes,
+    hasListedDescendants: a.hasListedDescendants,
+    coveredByAncestor: a.coveredByAncestor,
+    depth: a.depth,
+  }));
+
   return {
     scannedAt: new Date().toISOString(),
     demo: false,
     roots,
     minBytes,
     truncated,
-    items,
-    totalBytes: items.reduce((s, i) => s + i.sizeBytes, 0),
+    items: annotated,
+    totalBytes: annotated.reduce((s, i) => s + i.sizeBytes, 0),
+    uniqueTotalBytes: uniqueBytesTotal(annotated),
   };
 }
 
@@ -281,7 +301,7 @@ export async function listDirChildren(
     if (ent.name === '.' || ent.name === '..') continue;
     const full = path.join(abs, ent.name);
     try {
-      if (ent.isSymbolicLink()) continue;
+      if (ent.isSymbolicLink() || (await isSkippedLinkOrReparse(full))) continue;
       if (ent.isFile()) {
         const st = await fs.promises.lstat(full);
         children.push({
@@ -324,7 +344,7 @@ export async function listDirChildren(
 
 export function demoLargeFind(): LargeFindResult {
   const home = homeDir();
-  const items: LargeItem[] = [
+  const items: Omit<LargeItem, 'inclusiveBytes' | 'uniqueBytes' | 'hasListedDescendants' | 'coveredByAncestor' | 'depth'>[] = [
     {
       id: itemId('large', path.join(home, 'Downloads', 'ubuntu.iso')),
       cleanId: itemId('large', path.join(home, 'Downloads', 'ubuntu.iso')),
@@ -362,13 +382,29 @@ export function demoLargeFind(): LargeFindResult {
       mtimeMs: Date.now() - 400 * 86400000,
     },
   ];
+  const sorted = items.sort((a, b) => b.sizeBytes - a.sizeBytes);
+  const annotated = annotateHierarchy(sorted).map((a) => ({
+    id: a.id,
+    name: a.name,
+    path: a.path,
+    sizeBytes: a.sizeBytes,
+    kind: a.kind,
+    cleanId: a.cleanId,
+    mtimeMs: a.mtimeMs,
+    inclusiveBytes: a.inclusiveBytes,
+    uniqueBytes: a.uniqueBytes,
+    hasListedDescendants: a.hasListedDescendants,
+    coveredByAncestor: a.coveredByAncestor,
+    depth: a.depth,
+  }));
   return {
     scannedAt: new Date().toISOString(),
     demo: true,
     roots: [home, path.join(home, 'Downloads'), path.join(home, 'Desktop')],
     minBytes: 50 * 1024 * 1024,
     truncated: false,
-    items: items.sort((a, b) => b.sizeBytes - a.sizeBytes),
-    totalBytes: items.reduce((s, i) => s + i.sizeBytes, 0),
+    items: annotated,
+    totalBytes: annotated.reduce((s, i) => s + i.sizeBytes, 0),
+    uniqueTotalBytes: uniqueBytesTotal(annotated),
   };
 }

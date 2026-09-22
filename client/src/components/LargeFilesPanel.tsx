@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   fetchLargeRoots,
+  fetchPrefs,
+  fetchVolumes,
   listDirectory,
   runLargeScanWithProgress,
+  savePrefs,
   ScanCancelledError,
 } from '../api/client';
 import {
@@ -10,7 +13,19 @@ import {
   canBrowseFolders,
   canRevealInExplorer,
 } from '../desktop/api';
-import type { DirChild, LargeFindResult, LargeItem, ScanProgress } from '../types';
+import type {
+  DirChild,
+  LargeFindResult,
+  LargeItem,
+  ScanProgress,
+  VolumeInfo,
+} from '../types';
+import {
+  applyHierarchicalSelection,
+  coveredBySelection,
+  filterTopLevelItems,
+  uniqueBytesTotal,
+} from '../hierarchy';
 import { formatBytes } from '../utils';
 import { PathActions } from './PathActions';
 import { ScanProgressBar } from './ScanProgressBar';
@@ -18,8 +33,8 @@ import { ScanProgressBar } from './ScanProgressBar';
 interface Props {
   onError: (msg: string | null) => void;
   selected: Set<string>;
-  onToggle: (id: string) => void;
-  onToggleAll: (items: LargeItem[], select: boolean) => void;
+  /** Replace the selection set (used for hierarchy-aware select). */
+  onChangeSelected: (next: Set<string>) => void;
   onResult: (result: LargeFindResult | null) => void;
   result: LargeFindResult | null;
 }
@@ -53,8 +68,7 @@ function minLabel(bytes: number): string {
 export function LargeFilesPanel({
   onError,
   selected,
-  onToggle,
-  onToggleAll,
+  onChangeSelected,
   onResult,
   result,
 }: Props) {
@@ -76,13 +90,33 @@ export function LargeFilesPanel({
   const abortRef = useRef<AbortController | null>(null);
   const hasBrowse = canBrowseFolders();
   const hasReveal = canRevealInExplorer();
+  /** Default: top-level / non-nested list (TreeSize-style). */
+  const [showNested, setShowNested] = useState(false);
+  const [volumes, setVolumes] = useState<VolumeInfo[]>([]);
 
   useEffect(() => {
     void (async () => {
       try {
-        const data = await fetchLargeRoots();
-        setRoots(data.roots);
-        setChosen(new Set(data.roots));
+        const [rootsData, prefs, vols] = await Promise.all([
+          fetchLargeRoots(),
+          fetchPrefs().catch(() => null),
+          fetchVolumes().catch(() => ({ volumes: [] as VolumeInfo[] })),
+        ]);
+        setVolumes(vols.volumes ?? []);
+        const remembered = prefs?.lastLargeRoots?.filter(Boolean) ?? [];
+        const initial =
+          remembered.length > 0 ? remembered : rootsData.roots;
+        setRoots((prev) => {
+          const merged = [...prev];
+          for (const r of initial) {
+            if (!merged.includes(r)) merged.push(r);
+          }
+          return merged.length ? merged : rootsData.roots;
+        });
+        setChosen(new Set(initial.length ? initial : rootsData.roots));
+        if (prefs?.lastLargeMinBytes && prefs.lastLargeMinBytes > 0) {
+          setMinBytes(prefs.lastLargeMinBytes);
+        }
       } catch (e) {
         onError(e instanceof Error ? e.message : 'Could not load roots');
       }
@@ -105,6 +139,9 @@ export function LargeFilesPanel({
     if (kindFilter !== 'all') {
       items = items.filter((i) => i.kind === kindFilter);
     }
+    if (!showNested) {
+      items = filterTopLevelItems(items);
+    }
     items.sort((a, b) => {
       switch (sortKey) {
         case 'name':
@@ -123,14 +160,61 @@ export function LargeFilesPanel({
       }
     });
     return items;
-  }, [result, sortKey, kindFilter]);
+  }, [result, sortKey, kindFilter, showNested]);
 
   const selectedBytes = useMemo(() => {
     if (!result) return 0;
-    return result.items
-      .filter((i) => selected.has(i.cleanId))
-      .reduce((s, i) => s + i.sizeBytes, 0);
+    const picked = result.items.filter((i) => selected.has(i.cleanId));
+    return uniqueBytesTotal(picked);
   }, [result, selected]);
+
+  const coveredIds = useMemo(() => {
+    if (!result) return new Set<string>();
+    return coveredBySelection(
+      selected,
+      result.items.map((i) => ({ id: i.cleanId, path: i.path }))
+    );
+  }, [result, selected]);
+
+  function toggleOne(item: LargeItem) {
+    const want = !selected.has(item.cleanId);
+    // Covered by a selected parent — ignore toggle (parent owns the reclaim).
+    if (want && coveredIds.has(item.cleanId)) return;
+    const next = applyHierarchicalSelection(
+      selected,
+      item.cleanId,
+      result?.items.map((i) => ({ id: i.cleanId, path: i.path })) ?? [],
+      want
+    );
+    onChangeSelected(next);
+  }
+
+  function toggleAllVisible(select: boolean) {
+    if (!result) return;
+    if (!select) {
+      const next = new Set(selected);
+      for (const item of filteredSorted) next.delete(item.cleanId);
+      onChangeSelected(next);
+      return;
+    }
+    // Select top-level of the visible set only (avoids nesting overlap).
+    const tops = filterTopLevelItems(filteredSorted);
+    const next = new Set(selected);
+    // Drop any previously selected descendants of these tops
+    for (const top of tops) {
+      for (const item of result.items) {
+        if (item.cleanId !== top.cleanId && item.path.startsWith(top.path)) {
+          // path check refined via hierarchy helper below
+        }
+      }
+    }
+    const mapped = result.items.map((i) => ({ id: i.cleanId, path: i.path }));
+    let cur = new Set(next);
+    for (const top of tops) {
+      cur = applyHierarchicalSelection(cur, top.cleanId, mapped, true);
+    }
+    onChangeSelected(cur);
+  }
 
   function toggleRoot(root: string) {
     setChosen((prev) => {
@@ -184,13 +268,18 @@ export function LargeFilesPanel({
         {
           roots: Array.from(chosen),
           minBytes,
-          maxDepth: 4,
-          maxItems: 80,
+          maxDepth: 5,
+          maxItems: 150,
+          maxMs: 30_000,
         },
         (p) => setScanProgress(p),
         ac.signal
       );
       onResult(data);
+      void savePrefs({
+        lastLargeRoots: Array.from(chosen),
+        lastLargeMinBytes: minBytes,
+      }).catch(() => undefined);
     } catch (e) {
       if (e instanceof ScanCancelledError || (e instanceof Error && e.name === 'AbortError')) {
         onError(null);
@@ -253,12 +342,19 @@ export function LargeFilesPanel({
       <div className="results-header">
         <h2 id="large-title">Large files &amp; folders</h2>
         {result && (
-          <div className="reclaim">{formatBytes(result.totalBytes)} found</div>
+          <div className="reclaim" title="Inclusive sizes can overlap when nested folders are listed; unique total removes that overlap.">
+            {formatBytes(result.uniqueTotalBytes ?? uniqueBytesTotal(result.items))} unique
+            {result.totalBytes !== (result.uniqueTotalBytes ?? 0) && (
+              <span className="reclaim-sub"> · {formatBytes(result.totalBytes)} raw sum</span>
+            )}
+          </div>
         )}
       </div>
       <p className="panel-lead">
-        Find the biggest items under chosen folders. Use Browse to pick roots, then
-        Open / Show in Explorer before deleting anything large.
+        Find the biggest items under chosen folders or drives. Folder sizes are
+        inclusive (like TreeSize / WinDirStat). Totals use <strong>unique</strong> bytes
+        so parent + child are never double-counted. Selecting a parent auto-deselects
+        nested children.
       </p>
 
       <div className={`settings-fold ${settingsOpen ? 'open' : 'closed'}`}>
@@ -328,6 +424,41 @@ export function LargeFilesPanel({
                 <p className="note">No roots yet — browse or type a folder path.</p>
               )}
             </div>
+
+
+            {volumes.length > 0 && (
+              <div className="drive-picker" role="group" aria-label="Drives">
+                <span className="field-label">Drives</span>
+                <div className="drive-chips">
+                  {volumes.map((vol) => {
+                    return (
+                      <button
+                        key={vol.path}
+                        type="button"
+                        className={`drive-chip ${chosen.has(vol.path) ? 'on' : ''}`}
+                        disabled={scanning}
+                        title={vol.path}
+                        onClick={() => {
+                          const p = vol.path;
+                          if (!roots.includes(p)) setRoots((r) => [...r, p]);
+                          setChosen((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(p)) next.delete(p);
+                            else next.add(p);
+                            return next;
+                          });
+                        }}
+                      >
+                        {vol.label}
+                        {vol.freeBytes != null && (
+                          <span className="drive-free">{formatBytes(vol.freeBytes)} free</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div className="add-root">
               <input
@@ -401,7 +532,8 @@ export function LargeFilesPanel({
 
       {!scanning && !result && (
         <div className="empty-state" role="status">
-          <p>No scan yet. Pick roots and click Find large items.</p>
+          <p>No scan yet. Pick a drive or folder, then click Find large items.</p>
+          <p className="note">Tip: scan a whole drive (e.g. D:) then review the largest top-level folders.</p>
         </div>
       )}
 
@@ -410,6 +542,13 @@ export function LargeFilesPanel({
           {result.truncated && (
             <p className="note warn-note" role="status">
               Partial scan — hit a depth, time, or count limit. Results may be incomplete.
+              Unique totals still avoid double-counting whatever was found.
+            </p>
+          )}
+          {!showNested && result.items.some((i) => i.coveredByAncestor) && (
+            <p className="note hint-note" role="status">
+              Showing top-level items only ({filteredSorted.length} of {result.items.length}).
+              Enable “Show nested items” to see folders inside larger matches.
             </p>
           )}
           {dupCount > 0 && (
@@ -426,7 +565,18 @@ export function LargeFilesPanel({
             </div>
           ) : (
             <>
-              <div className="toolbar-row">
+              <div className="toolbar-row sticky-toolbar">
+                <label className="field inline">
+                  <span className="check-inline">
+                    <input
+                      type="checkbox"
+                      className="check"
+                      checked={showNested}
+                      onChange={(e) => setShowNested(e.target.checked)}
+                    />
+                    Show nested items
+                  </span>
+                </label>
                 <label className="field inline">
                   <span>Sort</span>
                   <select
@@ -457,12 +607,15 @@ export function LargeFilesPanel({
                   {
                     filteredSorted.filter((i) => selected.has(i.cleanId)).length
                   }
-                  /{filteredSorted.length} selected · {formatBytes(selectedBytes)}
+                  /{filteredSorted.length} selected ·{' '}
+                  <strong title="Nested overlap removed">
+                    {formatBytes(selectedBytes)} unique
+                  </strong>
                 </span>
                 <button
                   type="button"
                   className="linkish"
-                  onClick={() => onToggleAll(filteredSorted, !allSelected)}
+                  onClick={() => toggleAllVisible(!allSelected)}
                 >
                   {allSelected ? 'Deselect all' : 'Select all'}
                 </button>
@@ -478,13 +631,21 @@ export function LargeFilesPanel({
                     const isDup = duplicateNames.has(item.name.toLowerCase());
                     return (
                       <div key={item.cleanId} className="item item-row" role="listitem">
-                        <label className="item-main">
+                        <label
+                          className={`item-main ${coveredIds.has(item.cleanId) ? 'covered' : ''} ${item.coveredByAncestor && showNested ? 'nested' : ''}`}
+                          style={showNested ? { paddingLeft: `${0.5 + Math.min(item.depth, 6) * 0.55}rem` } : undefined}
+                        >
                           <input
                             className="check"
                             type="checkbox"
                             checked={selected.has(item.cleanId)}
-                            onChange={() => onToggle(item.cleanId)}
-                            aria-label={`Select ${item.name}`}
+                            disabled={coveredIds.has(item.cleanId)}
+                            onChange={() => toggleOne(item)}
+                            aria-label={
+                              coveredIds.has(item.cleanId)
+                                ? `${item.name} (covered by selected parent)`
+                                : `Select ${item.name}`
+                            }
                           />
                           <div className="item-text">
                             <strong>
@@ -492,6 +653,16 @@ export function LargeFilesPanel({
                               <span className={`chip kind ${item.kind}`}>
                                 {item.kind === 'dir' ? 'Folder' : 'File'}
                               </span>
+                              {item.hasListedDescendants && (
+                                <span className="chip nest" title="Contains other listed results (size is inclusive)">
+                                  Has nested
+                                </span>
+                              )}
+                              {coveredIds.has(item.cleanId) && (
+                                <span className="chip covered-chip" title="Included in a selected parent — not counted again">
+                                  Covered
+                                </span>
+                              )}
                               {isDup && (
                                 <span className="chip dup" title="Same name appears more than once">
                                   Dup name
@@ -505,7 +676,9 @@ export function LargeFilesPanel({
                               )}
                             </span>
                           </div>
-                          <div className="item-size">{formatBytes(item.sizeBytes)}</div>
+                          <div className="item-size" title={item.coveredByAncestor ? 'Inclusive size; excluded from unique total while parent is listed' : 'Inclusive size'}>
+                            {formatBytes(item.sizeBytes)}
+                          </div>
                         </label>
                         <div className="item-actions">
                           {item.kind === 'dir' && (
@@ -527,6 +700,7 @@ export function LargeFilesPanel({
               <p className="presets-hint">
                 Deleting requires Clear confirmation — large items are always Review.
                 Prefer Open / Show in Explorer before removing big folders.
+                If a parent is selected, nested children are skipped on delete (one remove is enough).
               </p>
             </>
           )}

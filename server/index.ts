@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Response } from 'express';
 import { demoDiskUsage, demoScan } from './demo.js';
-import { getDiskUsage, expandHome, pathExists } from './fsutil.js';
+import { getDiskUsage, expandHome, pathExists, listVolumes } from './fsutil.js';
 import {
   forgetItems,
   getRememberedItems,
@@ -147,11 +147,11 @@ async function runLargeFind(
       ? body.minBytes
       : 50 * 1024 * 1024;
   const maxDepth =
-    typeof body.maxDepth === 'number' ? Math.min(8, Math.max(1, body.maxDepth)) : 4;
+    typeof body.maxDepth === 'number' ? Math.min(12, Math.max(1, body.maxDepth)) : 5;
   const maxItems =
-    typeof body.maxItems === 'number' ? Math.min(200, Math.max(1, body.maxItems)) : 80;
+    typeof body.maxItems === 'number' ? Math.min(500, Math.max(1, body.maxItems)) : 150;
   const maxMs =
-    typeof body.maxMs === 'number' ? Math.min(60_000, Math.max(1000, body.maxMs)) : 12_000;
+    typeof body.maxMs === 'number' ? Math.min(120_000, Math.max(1000, body.maxMs)) : 30_000;
 
   let roots: string[] | undefined;
   if (Array.isArray(body.roots) && body.roots.length > 0) {
@@ -265,14 +265,22 @@ app.post('/api/large-scan', async (req, res) => {
       const report = (p: ScanProgress) => sseSend(res, 'progress', p);
       const result = await runLargeFind(body, report, ac.signal);
       rememberCleanItems(largeItemsToCleanItems(result.items));
-      await writePrefs({ lastScanAt: result.scannedAt });
+      await writePrefs({
+        lastScanAt: result.scannedAt,
+        lastLargeRoots: result.roots,
+        lastLargeMinBytes: result.minBytes,
+      });
       sseSend(res, 'result', result);
       res.end();
       return;
     }
     const result = await runLargeFind(body, undefined, ac.signal);
     rememberCleanItems(largeItemsToCleanItems(result.items));
-    await writePrefs({ lastScanAt: result.scannedAt });
+    await writePrefs({
+      lastScanAt: result.scannedAt,
+      lastLargeRoots: result.roots,
+      lastLargeMinBytes: result.minBytes,
+    });
     res.json(result);
   } catch (err) {
     const status = (err as { status?: number }).status;
@@ -382,6 +390,27 @@ app.post('/api/list-dir', async (req, res) => {
   }
 });
 
+
+app.get('/api/volumes', async (_req, res) => {
+  try {
+    if (DEMO_MODE) {
+      res.json({
+        volumes: [
+          { path: '/', label: 'Root (/)', totalBytes: 512 * 1024 ** 3, freeBytes: 120 * 1024 ** 3 },
+        ],
+        demo: true,
+      });
+      return;
+    }
+    const volumes = await listVolumes();
+    res.json({ volumes, demo: false });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to list volumes',
+    });
+  }
+});
+
 app.get('/api/large-roots', async (_req, res) => {
   try {
     if (DEMO_MODE) {
@@ -472,6 +501,16 @@ app.put('/api/prefs', async (req, res) => {
     }
     if (body.lastReminderAt === null || typeof body.lastReminderAt === 'string') {
       allowed.lastReminderAt = body.lastReminderAt ?? null;
+    }
+    if (body.lastLargeRoots === null) {
+      allowed.lastLargeRoots = null;
+    } else if (Array.isArray(body.lastLargeRoots)) {
+      allowed.lastLargeRoots = body.lastLargeRoots.filter((r): r is string => typeof r === 'string').slice(0, 32);
+    }
+    if (body.lastLargeMinBytes === null) {
+      allowed.lastLargeMinBytes = null;
+    } else if (typeof body.lastLargeMinBytes === 'number' && body.lastLargeMinBytes > 0) {
+      allowed.lastLargeMinBytes = body.lastLargeMinBytes;
     }
     const prefs = await writePrefs(allowed);
     res.json(prefs);

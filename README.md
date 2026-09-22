@@ -13,6 +13,13 @@ A calm, Windows-style disk cleaner — scan → review → free space in under a
 
 Works as a **web app** (Vite + Express) and as a **standalone Electron desktop app** with native folder Browse and Open / Show in Explorer.
 
+## What's new in 1.4.0
+
+- **Unique reclaimable totals** for Large files: folder sizes stay inclusive, but listed/selected totals never double-count nested paths (TreeSize / WinDirStat pattern). Selecting a parent covers children.
+- Default **top-level results** list; optional “Show nested items”.
+- **Drive picker** plus remembered roots / min-size.
+- Scans skip junctions/symlinks by default; slightly higher caps for big disks.
+
 ## What's new in 1.3.0
 
 - **Unified frameless titlebar** with Mac-style traffic lights (close / minimize / maximize), drag region, and double-click to maximize — one chrome only in Electron.
@@ -103,7 +110,7 @@ One click selects matching groups after a scan (or triggers a scan first):
 **Presets never delete** — they only select. You must confirm Clear.
 
 ### Large files & folders
-Separate sidebar view to find the largest files/folders under user-chosen roots (defaults: home, Downloads, Desktop). Configurable minimum size (e.g. 50 MB). **Browse…** picks folders in Electron; typed paths still work in the browser. Sort by size / oldest / name / path; filter files vs folders; duplicate-name hints; drill into a folder (list children without deleting). Each row has **Open** / **Show in Explorer** when running under Electron. Scans are bounded by depth, time, and count. Select + delete uses the same confirm-required clear path; items are always **Review**.
+Separate sidebar view to find the largest files/folders under user-chosen roots (defaults: home, Downloads, Desktop). Configurable minimum size (e.g. 50 MB). **Browse…** picks folders in Electron; typed paths still work in the browser. Sort by size / oldest / name / path; filter files vs folders; duplicate-name hints; drill into a folder (list children without deleting). Each row has **Open** / **Show in Explorer** when running under Electron. Scans are bounded by depth, time, and count. Folder sizes are inclusive; totals use unique bytes so parent + child are never double-counted. Symlinks/junctions are not followed by default. Select + delete uses the same confirm-required clear path; items are always **Review**.
 
 ### Scheduled / recurring scans
 Preferences: off / daily / weekly. Stored in `data/prefs.json` on the server and mirrored in `localStorage`. UI shows last scan time and next reminder. Electron checks on an interval while open.

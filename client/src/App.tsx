@@ -21,13 +21,13 @@ import type {
   CleanGroup,
   DiskUsage,
   LargeFindResult,
-  LargeItem,
   LastScanSummary,
   PresetId,
   ScanProgress,
   ScanResult,
   ScheduleMode,
 } from './types';
+import { uniqueBytesTotal } from './hierarchy';
 import { formatBytes, formatWhen, idsForPreset, isReminderDue } from './utils';
 
 type Phase = 'idle' | 'scanning' | 'results' | 'success';
@@ -38,6 +38,8 @@ const DEFAULT_PREFS: AppPrefs = {
   schedule: 'off',
   lastScanAt: null,
   lastReminderAt: null,
+  lastLargeRoots: null,
+  lastLargeMinBytes: null,
 };
 
 const SUMMARY_KEY = 'disk-cleaner-last-summary';
@@ -175,12 +177,22 @@ export default function App() {
   }, [scan, largeResult]);
 
   const selectedBytes = useMemo(() => {
+    // Clean-tab items are never nested; large-tab items need unique totals.
+    if (largeResult) {
+      const largeSelected = largeResult.items.filter((i) => selected.has(i.cleanId));
+      const largeIds = new Set(largeSelected.map((i) => i.cleanId));
+      let cleanPart = 0;
+      selected.forEach((id) => {
+        if (!largeIds.has(id)) cleanPart += itemMap.get(id)?.sizeBytes ?? 0;
+      });
+      return cleanPart + uniqueBytesTotal(largeSelected);
+    }
     let total = 0;
     selected.forEach((id) => {
       total += itemMap.get(id)?.sizeBytes ?? 0;
     });
     return total;
-  }, [selected, itemMap]);
+  }, [selected, itemMap, largeResult]);
 
   const hasReview = useMemo(() => {
     for (const id of selected) {
@@ -317,15 +329,8 @@ export default function App() {
     }
   }
 
-  function toggleLargeAll(items: LargeItem[], select: boolean) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const item of items) {
-        if (select) next.add(item.cleanId);
-        else next.delete(item.cleanId);
-      }
-      return next;
-    });
+  function changeLargeSelection(next: Set<string>) {
+    setSelected(next);
   }
 
   async function handleClear() {
@@ -551,12 +556,35 @@ export default function App() {
             <LargeFilesPanel
               onError={setError}
               selected={selected}
-              onToggle={toggleItem}
-              onToggleAll={toggleLargeAll}
+              onChangeSelected={changeLargeSelection}
               result={largeResult}
               onResult={(r) => {
                 setLargeResult(r);
-                if (r) void markScanned(r.scannedAt);
+                if (r) {
+                  void markScanned(r.scannedAt);
+                  const valid = new Set(r.items.map((i) => i.cleanId));
+                  setSelected((prev) => {
+                    const next = new Set<string>();
+                    for (const id of prev) {
+                      // Keep if still a large hit, or if it was never a large id
+                      if (valid.has(id)) next.add(id);
+                      else if (!largeResult?.items.some((i) => i.cleanId === id)) next.add(id);
+                    }
+                    return next;
+                  });
+                } else {
+                  // Cleared results — drop large ids only
+                  setSelected((prev) => {
+                    const largeIds = new Set(
+                      (largeResult?.items ?? []).map((i) => i.cleanId)
+                    );
+                    const next = new Set<string>();
+                    for (const id of prev) {
+                      if (!largeIds.has(id)) next.add(id);
+                    }
+                    return next;
+                  });
+                }
               }}
             />
           )}
@@ -585,6 +613,7 @@ export default function App() {
       >
         <div className="sel">
           {selected.size} selected · {formatBytes(selectedBytes)}
+          {largeResult ? ' unique (nested overlap removed)' : ''}
         </div>
         <button
           type="button"

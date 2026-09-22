@@ -13,6 +13,8 @@ const DEFAULTS: AppPrefs = {
   schedule: 'off',
   lastScanAt: null,
   lastReminderAt: null,
+  lastLargeRoots: null,
+  lastLargeMinBytes: null,
 };
 
 export async function readPrefs(): Promise<AppPrefs> {

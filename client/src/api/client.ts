@@ -40,6 +40,7 @@ export function runLargeScan(body: {
   minBytes?: number;
   maxDepth?: number;
   maxItems?: number;
+  maxMs?: number;
 }): Promise<LargeFindResult> {
   return request('/api/large-scan', {
     method: 'POST',
@@ -148,6 +149,7 @@ export function runLargeScanWithProgress(
     minBytes?: number;
     maxDepth?: number;
     maxItems?: number;
+    maxMs?: number;
   },
   onProgress?: (p: ScanProgress) => void,
   signal?: AbortSignal
@@ -160,6 +162,13 @@ export function runLargeScanWithProgress(
 
 export function fetchLargeRoots(): Promise<{ roots: string[]; demo: boolean }> {
   return request('/api/large-roots');
+}
+
+export function fetchVolumes(): Promise<{
+  volumes: import('../types').VolumeInfo[];
+  demo: boolean;
+}> {
+  return request('/api/volumes');
 }
 
 export function listDirectory(dirPath: string): Promise<ListDirResult> {

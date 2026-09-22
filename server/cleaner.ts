@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { CleanItem, ClearResult } from './types.js';
 import { pathExists, removePath } from './fsutil.js';
+import { filterTopLevelItems } from './hierarchy.js';
 
 const HOME = os.homedir();
 
@@ -53,7 +54,8 @@ export async function clearItems(
   demo: boolean
 ): Promise<ClearResult> {
   if (demo) {
-    const freedBytes = items.reduce((s, i) => s + i.sizeBytes, 0);
+    const top = filterTopLevelItems(items);
+    const freedBytes = top.reduce((s, i) => s + i.sizeBytes, 0);
     return {
       freedBytes,
       clearedIds: items.map((i) => i.id),
@@ -62,11 +64,23 @@ export async function clearItems(
     };
   }
 
+  // If both a parent folder and nested children are selected, only delete the
+  // parent (inclusive). Nested selections would be double-work / double-count.
+  const toClear = filterTopLevelItems(items);
+
   const clearedIds: string[] = [];
   const errors: { id: string; message: string }[] = [];
   let freedBytes = 0;
 
+  // Nested selections covered by a parent count as cleared without a separate rm.
   for (const item of items) {
+    if (toClear.some((t) => t.id === item.id)) continue;
+    if (toClear.some((t) => item.path !== t.path && (item.path.startsWith(t.path + '/') || item.path.startsWith(t.path + '\\')))) {
+      clearedIds.push(item.id);
+    }
+  }
+
+  for (const item of toClear) {
     try {
       if (isForbidden(item.path)) {
         errors.push({ id: item.id, message: 'Path is protected and cannot be deleted' });
